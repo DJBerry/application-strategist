@@ -1,0 +1,6 @@
+Senior Python Developer
+
+Requirements:
+- 5+ years Python
+- REST API design
+- Team leadership
