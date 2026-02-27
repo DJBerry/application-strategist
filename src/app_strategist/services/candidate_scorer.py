@@ -12,11 +12,12 @@ logger = logging.getLogger(__name__)
 
 # Fixed rubric weights
 CANDIDATE_RUBRIC = [
-    ("Role clarity", 0.25),
+    ("Likely interest alignment", 0.20),
+    ("Role clarity", 0.15),
     ("Compensation/benefits transparency", 0.20),
     ("Work-life balance signals", 0.15),
-    ("Growth/career path", 0.20),
-    ("Red-flag absence", 0.20),
+    ("Growth/career path", 0.15),
+    ("Red-flag absence", 0.15),
 ]
 
 SYSTEM_PROMPT = """You are an expert career advisor evaluating a job description from the candidate's perspective.
@@ -36,6 +37,7 @@ Output valid JSON only, no markdown. Schema:
   "worker_fit_score": {
     "value": 0-100,
     "components": [
+      {"name": "Likely interest alignment", "weight": 0.20, "score": 0-100, "explanation": "..."},
       {"name": "Role clarity", "weight": 0.25, "score": 0-100, "explanation": "..."},
       {"name": "Compensation/benefits transparency", "weight": 0.20, "score": 0-100, "explanation": "..."},
       {"name": "Work-life balance signals", "weight": 0.15, "score": 0-100, "explanation": "..."},
@@ -74,33 +76,47 @@ Candidate Documents (for context on candidate background):
 
 Evaluate from the worker's perspective. Output JSON only."""
 
-        response = self._llm.complete(SYSTEM_PROMPT, [{"role": "user", "content": user}])
+        response = self._llm.complete(
+            SYSTEM_PROMPT, [{"role": "user", "content": user}]
+        )
         raw = _extract_json(response)
         data = json.loads(raw)
 
         components = []
         for name, weight in CANDIDATE_RUBRIC:
             comp_data = next(
-                (c for c in data["worker_fit_score"]["components"] if c["name"] == name),
+                (
+                    c
+                    for c in data["worker_fit_score"]["components"]
+                    if c["name"] == name
+                ),
                 None,
             )
             if comp_data:
-                components.append(ScoreComponent(
-                    name=name,
-                    weight=weight,
-                    score=float(comp_data["score"]),
-                    explanation=comp_data["explanation"],
-                ))
+                components.append(
+                    ScoreComponent(
+                        name=name,
+                        weight=weight,
+                        score=float(comp_data["score"]),
+                        explanation=comp_data["explanation"],
+                    )
+                )
             else:
-                components.append(ScoreComponent(
-                    name=name,
-                    weight=weight,
-                    score=50.0,
-                    explanation="Component not provided by model",
-                ))
+                components.append(
+                    ScoreComponent(
+                        name=name,
+                        weight=weight,
+                        score=50.0,
+                        explanation="Component not provided by model",
+                    )
+                )
 
         total_weight = sum(c.weight for c in components)
-        value = sum(c.score * c.weight for c in components) / total_weight if total_weight > 0 else 0
+        value = (
+            sum(c.score * c.weight for c in components) / total_weight
+            if total_weight > 0
+            else 0
+        )
 
         worker_fit_score = FitScore(value=round(value, 1), components=components)
 
