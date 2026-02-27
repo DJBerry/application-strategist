@@ -17,33 +17,71 @@ def _render_score_components(components: list, title: str) -> None:
     table.add_column("Component", style="cyan")
     table.add_column("Weight", justify="right")
     table.add_column("Score", justify="right")
-    table.add_column("Explanation")
+    table.add_column("Explanation", overflow="fold")
     for c in components:
         table.add_row(
             c.name,
             f"{c.weight * 100:.0f}%",
             f"{c.score:.0f}",
-            c.explanation[:80] + "..." if len(c.explanation) > 80 else c.explanation,
+            c.explanation,
         )
     console.print(table)
+
+
+def render_quick_summary(
+    employer_eval: EmployerEvaluation, candidate_eval: CandidateEvaluation
+) -> None:
+    """Render a quick summary of the evaluation."""
+    console.print()
+    console.print(Panel("[bold]Quick Summary[/bold]", style="white"))
+    console.print()
+
+    console.print(
+        f"[bold]Overall Fit Score:[/bold] [green]{min(employer_eval.fit_score.value, candidate_eval.worker_fit_score.value):.0f}/100[/green]"
+    )
+
+    console.print(
+        f"[dim][bold]Employer Fit Score:[/bold] [green]{employer_eval.fit_score.value:.0f}/100[/green][/dim]"
+    )
+
+    console.print(
+        f"[dim][bold]Candidate Fit Score:[/bold] [green]{candidate_eval.worker_fit_score.value:.0f}/100[/green][/dim]"
+    )
+    console.print()
+
+    console.print("[bold]Employer-Side Summary[/bold]")
+    console.print(f"[dim]{employer_eval.score_rationale}[/dim]")
+    console.print()
+
+    console.print("[bold]Candidate-Side Summary[/bold]")
+    console.print(f"[dim]{candidate_eval.score_rationale}[/dim]")
+    console.print()
 
 
 def render_employer_evaluation(eval_: EmployerEvaluation) -> None:
     """Pretty-print employer-side evaluation."""
     console.print()
-    console.print(Panel("[bold]Employer-Side Evaluation[/bold] (Hiring Manager / Recruiter Perspective)", style="blue"))
+    console.print(
+        Panel(
+            "[bold]Employer-Side Evaluation[/bold] (Hiring Manager / Recruiter Perspective)",
+            style="blue",
+        )
+    )
     console.print()
 
     # Fit score
-    console.print(f"[bold]Fit Score:[/bold] [green]{eval_.fit_score.value:.0f}/100[/green]")
-    console.print(f"[dim]{eval_.score_rationale}[/dim]")
+    console.print(
+        f"[bold]Fit Score:[/bold] [green]{eval_.fit_score.value:.0f}/100[/green]"
+    )
     console.print()
 
     _render_score_components(eval_.fit_score.components, "Score Breakdown")
 
     if eval_.strengths:
         console.print()
-        console.print("[bold green]Strengths[/bold green] (where your experience aligns):")
+        console.print(
+            "[bold green]Strengths[/bold green] (where your experience aligns):"
+        )
         for s in eval_.strengths:
             console.print(f"  • {s}")
 
@@ -73,11 +111,16 @@ def render_employer_evaluation(eval_: EmployerEvaluation) -> None:
 def render_candidate_evaluation(eval_: CandidateEvaluation) -> None:
     """Pretty-print candidate-side evaluation."""
     console.print()
-    console.print(Panel("[bold]Candidate-Side Evaluation[/bold] (Worker Perspective)", style="green"))
+    console.print(
+        Panel(
+            "[bold]Candidate-Side Evaluation[/bold] (Worker Perspective)", style="green"
+        )
+    )
     console.print()
 
-    console.print(f"[bold]Worker Fit Score:[/bold] [green]{eval_.worker_fit_score.value:.0f}/100[/green]")
-    console.print(f"[dim]{eval_.score_rationale}[/dim]")
+    console.print(
+        f"[bold]Worker Fit Score:[/bold] [green]{eval_.worker_fit_score.value:.0f}/100[/green]"
+    )
     console.print()
 
     _render_score_components(eval_.worker_fit_score.components, "Score Breakdown")
@@ -106,5 +149,6 @@ class ConsoleRenderer:
 
     def render(self, session: AnalysisSession) -> None:
         """Render full analysis to console."""
+        render_quick_summary(session.employer_eval, session.candidate_eval)
         render_employer_evaluation(session.employer_eval)
         render_candidate_evaluation(session.candidate_eval)
