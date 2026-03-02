@@ -25,7 +25,7 @@ class AnthropicProvider:
     ) -> None:
         self.model = model
         self.max_tokens = max_tokens
-        self._client = Anthropic(api_key=api_key or get_api_key())
+        self._client = Anthropic(api_key=api_key or get_api_key("anthropic"))
 
     def complete(self, system_prompt: str, messages: list[dict]) -> str:
         """Call Claude and return the assistant text."""
