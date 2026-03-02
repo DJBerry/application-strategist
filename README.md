@@ -21,13 +21,21 @@ Job search assistance CLI — compare your resume and cover letter against job d
    uv sync
    ```
 
-2. Create a `.env` file with your Anthropic API key:
+2. Create a `.env` file with your API key(s). Set `LLM_PROVIDER` to choose the backend:
 
+   **Anthropic (default):**
    ```
+   LLM_PROVIDER=anthropic
    ANTHROPIC_API_KEY=your-api-key-here
    ```
-
    Get your key at [console.anthropic.com](https://console.anthropic.com/).
+
+   **OpenAI:**
+   ```
+   LLM_PROVIDER=openai
+   OPENAI_API_KEY=your-api-key-here
+   ```
+   Get your key at [platform.openai.com/api-keys](https://platform.openai.com/api-keys).
 
 ## Usage
 
@@ -63,7 +71,7 @@ uv run pytest tests/ -v
 
 ```
 src/app_strategist/
-├── llm/           # LLM provider abstraction (Anthropic in v1)
+├── llm/           # LLM provider abstraction (Anthropic, OpenAI)
 ├── parsers/       # File parsing (extensible for PDF, DOCX, URLs)
 ├── models/        # Pydantic evaluation models
 ├── services/      # Analysis orchestration, scoring
