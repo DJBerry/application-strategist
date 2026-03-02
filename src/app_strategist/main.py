@@ -9,7 +9,7 @@ import typer
 from rich.console import Console
 from rich.panel import Panel
 
-from app_strategist.config import get_api_key
+from app_strategist.config import get_llm_provider
 from app_strategist.models.session import AnalysisSession
 from app_strategist.rendering.console import ConsoleRenderer
 from app_strategist.services.analysis import AnalysisService
@@ -63,7 +63,7 @@ def analyze(
     _setup_logging(verbose)
 
     try:
-        get_api_key()  # Fail fast with clear error if missing
+        get_llm_provider()  # Fail fast with clear error if missing
         service = AnalysisService()
         session = service.analyze(
             resume_path=resume,
@@ -96,9 +96,7 @@ def analyze(
 
 def _run_repl(session: AnalysisSession) -> None:
     """Run follow-up question REPL with full session context."""
-    from app_strategist.llm import AnthropicProvider
-
-    llm = AnthropicProvider()
+    llm = get_llm_provider()
     context = session.to_context_string()
     system = REPL_SYSTEM_PROMPT.format(context=context)
 

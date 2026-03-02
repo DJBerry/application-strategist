@@ -4,7 +4,7 @@ import logging
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from app_strategist.llm import AnthropicProvider
+from app_strategist.config import get_llm_provider
 from app_strategist.models.session import AnalysisSession
 from app_strategist.parsers import DocumentParserRegistry, JobDescriptionParserRegistry
 from app_strategist.services.candidate_scorer import CandidateScorer
@@ -28,7 +28,7 @@ class AnalysisService:
     ) -> None:
         self._doc_registry = doc_registry or DocumentParserRegistry()
         self._job_registry = job_registry or JobDescriptionParserRegistry()
-        self._llm = llm or AnthropicProvider()
+        self._llm = llm or get_llm_provider()
         self._employer_scorer = EmployerScorer(self._llm)
         self._candidate_scorer = CandidateScorer(self._llm)
 
