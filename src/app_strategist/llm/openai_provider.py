@@ -8,7 +8,7 @@ from app_strategist.llm.base import LLMProvider
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_MODEL = "gpt-4o"  # "gpt-5.2"  # "gpt-4o"
+DEFAULT_MODEL = "gpt-5.2"  # "gpt-5.2"  # "gpt-4o"
 DEFAULT_MAX_TOKENS = 4096
 
 
