@@ -7,6 +7,8 @@ Job search assistance CLI — compare your resume and cover letter against job d
 - **Employer-side evaluation**: Strengths, gaps, suggested improvements, wording suggestions, fit score (0–100)
 - **Candidate-side evaluation**: Positive alignments, red flags, questions to ask, worker fit score (0–100)
 - **Follow-up REPL**: Ask follow-up questions about the evaluation with full context preserved
+- **Extraction-validation loop** (optional): Run a multi-agent extraction → validation → retry loop before evaluation to ensure claims are grounded in documents; view audit trace with `--show-trace`
+- **MCP server**: Expose resume validation tools for Cursor and other MCP clients via `resume-validator`
 
 ## Requirements
 
@@ -46,6 +48,12 @@ uv run app-strategist --resume path/to/resume.md --job path/to/job.txt
 # With cover letter
 uv run app-strategist --resume resume.md --job job.txt --cover-letter cover.md
 
+# Run extraction-validation loop before evaluation (ensures claims are document-grounded)
+uv run app-strategist --resume resume.md --job job.txt --validate
+
+# Show validation audit trace when using --validate
+uv run app-strategist --resume resume.md --job job.txt --validate --show-trace
+
 # Verbose logging
 uv run app-strategist --resume resume.md --job job.txt -v
 ```
@@ -60,6 +68,16 @@ After the evaluation is displayed, you can ask follow-up questions such as:
 
 Type `quit` or `exit` to leave the REPL.
 
+## MCP Server
+
+The project includes an MCP server (`resume-validator`) that exposes tools for validating extracted claims against resume and job description documents. Use it from Cursor or other MCP clients:
+
+```bash
+uv run resume-validator
+```
+
+The server provides tools such as `check_claim_in_document`, `validate_extraction_batch`, and `log_validation_event` for semantic claim validation.
+
 ## Development
 
 ```bash
@@ -73,7 +91,8 @@ uv run pytest tests/ -v
 src/app_strategist/
 ├── llm/           # LLM provider abstraction (Anthropic, OpenAI)
 ├── parsers/       # File parsing (extensible for PDF, DOCX, URLs)
-├── models/        # Pydantic evaluation models
-├── services/      # Analysis orchestration, scoring
-└── rendering/     # Rich console output
+├── models/        # Pydantic evaluation and session models
+├── services/      # Analysis orchestration, scoring, extractor, validator, orchestrator
+├── mcp_server/    # MCP server exposing resume validation tools
+└── rendering/     # Rich console output, audit trail
 ```

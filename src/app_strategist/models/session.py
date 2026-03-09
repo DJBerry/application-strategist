@@ -1,5 +1,7 @@
 """Session model - full context for REPL follow-up."""
 
+from typing import Any
+
 from pydantic import BaseModel, Field
 
 from app_strategist.models.evaluation import CandidateEvaluation, EmployerEvaluation
@@ -21,6 +23,10 @@ class AnalysisSession(BaseModel):
     candidate_eval: CandidateEvaluation = Field(
         ...,
         description="Candidate-side evaluation",
+    )
+    extraction_result: dict[str, Any] | None = Field(
+        default=None,
+        description="Optional validated extraction and audit trail from --validate",
     )
 
     def to_context_string(self) -> str:

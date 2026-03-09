@@ -37,6 +37,8 @@ class AnalysisService:
         resume_path: Path,
         job_path: Path,
         cover_letter_path: Path | None = None,
+        *,
+        validate: bool = False,
     ) -> AnalysisSession:
         """Parse inputs and produce full analysis (employer + candidate evaluations)."""
         logger.info("Parsing resume: %s", resume_path)
@@ -49,6 +51,51 @@ class AnalysisService:
         if cover_letter_path:
             logger.info("Parsing cover letter: %s", cover_letter_path)
             cover_letter_content = self._doc_registry.parse(cover_letter_path)
+
+        extraction_result = None
+        if validate:
+            from app_strategist.services.orchestrator import (
+                AgentStatus,
+                run_extraction_validation,
+            )
+
+            logger.info("Running extraction-validation for resume")
+            resume_result = run_extraction_validation(
+                document_text=resume_content,
+                document_type="resume",
+                task_description="Extract claims from this resume. Identify candidate experience, achievements, and responsibilities explicitly stated.",
+            )
+
+            logger.info("Running extraction-validation for job description")
+            jd_result = run_extraction_validation(
+                document_text=job_description,
+                document_type="job_description",
+                task_description="Extract claims from this job description. Identify required qualifications, preferred qualifications, and responsibilities explicitly stated.",
+            )
+
+            # Combine extraction outputs and audit trails
+            combined_output = {
+                "resume": resume_result.final_output,
+                "job_description": jd_result.final_output,
+            }
+            combined_trail = resume_result.audit_trail + jd_result.audit_trail
+            combined_unresolvable = (
+                resume_result.unresolvable_claims + jd_result.unresolvable_claims
+            )
+            status = (
+                AgentStatus.PASS
+                if resume_result.status == AgentStatus.PASS
+                and jd_result.status == AgentStatus.PASS
+                else AgentStatus.EXHAUSTED
+            )
+
+            extraction_result = {
+                "final_output": combined_output,
+                "status": status,
+                "attempts": resume_result.attempts + jd_result.attempts,
+                "audit_trail": combined_trail,
+                "unresolvable_claims": combined_unresolvable,
+            }
 
         logger.info("Running employer-side evaluation")
         employer_eval = self._employer_scorer.evaluate(
@@ -70,4 +117,5 @@ class AnalysisService:
             job_description=job_description,
             employer_eval=employer_eval,
             candidate_eval=candidate_eval,
+            extraction_result=extraction_result,
         )

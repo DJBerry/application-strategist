@@ -4,9 +4,11 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
+from rich.tree import Tree
 
 from app_strategist.models.evaluation import CandidateEvaluation, EmployerEvaluation
 from app_strategist.models.session import AnalysisSession
+from app_strategist.rendering.audit_trail import format_audit_trail
 
 console = Console()
 
@@ -144,11 +146,37 @@ def render_candidate_evaluation(eval_: CandidateEvaluation) -> None:
             console.print(f"  • {q}")
 
 
+def render_audit_trail(audit_trail: list) -> None:
+    """Render the validation audit trail as a tree."""
+    if not audit_trail:
+        return
+    formatted = format_audit_trail(audit_trail)
+    tree = Tree("[bold]Agent Trace[/bold] / Validation Log", expanded=True)
+    for event in formatted:
+        color = event.get("color", "white")
+        branch = tree.add(f"{event.get('icon', '')} [bold {color}]{event.get('label', '')}[/bold {color}]")
+        detail = event.get("detail")
+        if detail:
+            branch.add(detail)
+    console.print()
+    console.print(Panel(tree, title="[bold]Agent Trace[/bold]", border_style="dim"))
+
+
 class ConsoleRenderer:
     """Renders analysis session to console."""
 
-    def render(self, session: AnalysisSession) -> None:
+    def render(
+        self,
+        session: AnalysisSession,
+        *,
+        show_trace: bool = False,
+    ) -> None:
         """Render full analysis to console."""
         render_quick_summary(session.employer_eval, session.candidate_eval)
         render_employer_evaluation(session.employer_eval)
         render_candidate_evaluation(session.candidate_eval)
+
+        extraction_result = getattr(session, "extraction_result", None)
+        if extraction_result and show_trace:
+            trail = extraction_result.get("audit_trail", [])
+            render_audit_trail(trail)

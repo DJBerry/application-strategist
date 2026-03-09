@@ -58,6 +58,14 @@ def analyze(
         bool,
         typer.Option("--verbose", "-v", help="Enable debug logging"),
     ] = False,
+    validate: Annotated[
+        bool,
+        typer.Option("--validate", help="Run extraction-validation loop before evaluation"),
+    ] = False,
+    show_trace: Annotated[
+        bool,
+        typer.Option("--show-trace", help="Show agent trace / validation log when --validate was used"),
+    ] = False,
 ) -> None:
     """Compare resume/cover letter against job description and get actionable feedback."""
     _setup_logging(verbose)
@@ -69,10 +77,11 @@ def analyze(
             resume_path=resume,
             job_path=job,
             cover_letter_path=cover_letter,
+            validate=validate,
         )
 
         renderer = ConsoleRenderer()
-        renderer.render(session)
+        renderer.render(session, show_trace=show_trace or validate)
 
         # REPL loop
         _run_repl(session)
