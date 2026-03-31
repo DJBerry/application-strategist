@@ -53,12 +53,16 @@ Include a brief evidence statement grounded in the resume.
 
 STEP 3: Score the resume
 Score each component 0-100 using the exact weights below. 0 is the lowest score and should indicate no match at all. 100 is the highest score, and should indicate a candidate who fulfills all parts of the component perfectly. 
-For example:
-- A candidate who meets NONE of the core requirements should receive a score below 10 in the Core Requirements rubric. 
-- A candidate who meets ALL core requirements should receive a score above 90 in the Core Requirements rubric.
-- A candidate who far exceeds all core requirements should NOT receive a score of 100, as this may indicate overqualification. These candidates should receive scores between 50 and 90. For example, if the job requires 3 years of Python experience, and the candidate has 10 years of Python experience, then they should be treated as overqualified. Smaller margins of overqualification, like 5 years of experience when 4 are asked for, should NOT be penalized.
 
-These patterns should be extended to ALL criteria, including Preferred Requirements, Technical and domain alignment, etc.
+Score calibration:
+- 90-100: Exceptional fit. Strong evidence for nearly all must-haves and multiple strong-preference items. Resume is already well positioned.
+- 75-89: Strong fit. Most must-haves are supported, with some gaps or underemphasis.
+- 60-74: Moderate fit. Some meaningful alignment, but one or more important requirements are weak, indirect, or insufficiently evidenced.
+- 40-59: Limited fit. Several key requirements are missing or only weakly supported.
+- 0-39: Poor fit. Major must-have requirements are absent or not evidenced.
+
+Take into account overqualification:
+A candidate who far exceeds most or all requirements should NOT receive a score of 100, as this may indicate overqualification. These candidates should receive scores between 50 and 90. For example, if the job requires 2 years of Python experience with a preference for 4, and the candidate has 10 years of Python experience, then they should be treated as overqualified for that requirement. Smaller margins of overqualification, like 5 years of experience when 4 are asked for, should NOT be penalized.
 
 STEP 4: Recommend improvements
 Provide improvements that increase alignment without inventing facts.
