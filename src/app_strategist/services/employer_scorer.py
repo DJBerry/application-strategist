@@ -18,7 +18,7 @@ EMPLOYER_RUBRIC = [
     ("Relevant impact and scope", 0.125),
     ("Evidence quality and specificity", 0.075),
     ("ATS/keyword coverage", 0.05),
-    ("Resume clarity and positioning for this role", 0.05),
+    ("Resume/cover letter clarity and positioning for this role", 0.05),
 ]
 
 SYSTEM_PROMPT = """You are an expert hiring manager evaluating a candidate's resume and/or cover letter against a job description.
@@ -42,24 +42,46 @@ Identify the most important requirements from the job description. For each requ
 - classify it as one of: "must_have", "strong_preference", "nice_to_have"
 - identify its type: "technical_skill", "experience", "domain", "education_certification", "leadership", "communication", "tooling", "business_scope", or "other"
 
-STEP 2: Match resume evidence
-For each requirement, determine whether the resume shows:
+STEP 2: Match resume/cover letter evidence
+For each requirement, determine whether the resume/cover letter shows:
 - "strong_evidence"
 - "partial_evidence"
 - "weak_evidence"
 - "no_evidence"
 
-Include a brief evidence statement grounded in the resume.
+Include a brief evidence statement grounded in the resume/cover letter.
 
-STEP 3: Score the resume
+STEP 3: Score the resume/cover letter
 Score each component 0-100 using the exact weights below. 0 is the lowest score and should indicate no match at all. 100 is the highest score, and should indicate a candidate who fulfills all parts of the component perfectly. 
 
 Score calibration:
-- 90-100: Exceptional fit. Strong evidence for nearly all must-haves and multiple strong-preference items. Resume is already well positioned.
+- 90-100: Exceptional fit. Strong evidence for nearly all must-haves and multiple strong-preference items. Resume/cover letter is already well positioned.
 - 75-89: Strong fit. Most must-haves are supported, with some gaps or underemphasis.
 - 60-74: Moderate fit. Some meaningful alignment, but one or more important requirements are weak, indirect, or insufficiently evidenced.
 - 40-59: Limited fit. Several key requirements are missing or only weakly supported.
 - 0-39: Poor fit. Major must-have requirements are absent or not evidenced.
+
+Scoring components and weights:
+1. Core requirement match (0.35)
+   Measures how well the resume/cover letter demonstrates the job's must-have qualifications. Missing hard requirements should materially reduce this score.
+
+2. Preferred requirements match (0.20)
+   Measures how well the resume/cover letter demonstrates the job's strong-preference and nice-to-have qualifications. Missing requirements should materially reduce this score.
+
+3. Technical and domain alignment (0.15)
+   Measures alignment with the technical stack, methods, and domain context. Give partial credit for adjacent experience where justified.
+
+4. Relevant impact and scope (0.125)
+   Measures whether the candidate's accomplishments, ownership, scale, and seniority align with the role.
+
+5. Evidence quality and specificity (0.075)
+   Measures whether claims are supported by specific technologies, metrics, outcomes, and clear scope.
+
+5. ATS/keyword coverage (0.05)
+   Measures whether important job-description terminology appears explicitly and naturally in the resume/cover letter. This is about discoverability, not substantive fit alone.
+
+7. Resume/cover letter clarity and positioning for this role (0.05)
+   Measures how easy it is to find and understand the most relevant qualifications for this specific role.
 
 Take into account overqualification:
 A candidate who far exceeds most or all requirements should NOT receive a score of 100, as this may indicate overqualification. These candidates should receive scores between 50 and 90. For example, if the job requires 2 years of Python experience with a preference for 4, and the candidate has 10 years of Python experience, then they should be treated as overqualified for that requirement. Smaller margins of overqualification, like 5 years of experience when 4 are asked for, should NOT be penalized.
@@ -111,7 +133,7 @@ Schema:
       {"name": "Relevant impact and scope", "weight": 0.125, "score": 0-100, "explanation": "brief explanation"},
       {"name": "Evidence quality and specificity", "weight": 0.075, "score": 0-100, "explanation": "brief explanation"},
       {"name": "ATS/keyword coverage", "weight": 0.05, "score": 0-100, "explanation": "brief explanation"},
-      {"name": "Resume clarity and positioning for this role", "weight": 0.05, "score": 0-100, "explanation": "brief explanation"},
+      {"name": "Resume/cover letter clarity and positioning for this role", "weight": 0.05, "score": 0-100, "explanation": "brief explanation"},
     ]
   },
   "score_rationale": "Overall rationale that explains the score based on requirement coverage, missing must-haves, and strength of evidence."
