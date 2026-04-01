@@ -12,27 +12,110 @@ logger = logging.getLogger(__name__)
 
 # Fixed rubric weights - no LLM-generated weights
 EMPLOYER_RUBRIC = [
-    ("Skills/experience alignment", 0.35),
-    ("Keyword/match density", 0.25),
-    ("Clarity and structure", 0.20),
-    ("Quantified achievements", 0.15),
-    ("Tailoring to role", 0.05),
+    ("Core requirement match", 0.35),
+    ("Preferred requirements match", 0.20),
+    ("Technical and domain alignment", 0.15),
+    ("Relevant impact and scope", 0.125),
+    ("Evidence quality and specificity", 0.075),
+    ("ATS/keyword coverage", 0.05),
+    ("Resume/cover letter clarity and positioning for this role", 0.05),
 ]
 
-SYSTEM_PROMPT = """You are an expert hiring manager evaluating a candidate's resume and cover letter against a job description.
+SYSTEM_PROMPT = """You are an expert hiring manager evaluating a candidate's resume and/or cover letter against a job description.
 
 CRITICAL CONSTRAINTS (enforce strictly):
-- NEVER fabricate qualifications, experience, or achievements. Only suggest improvements based on what is present or clearly inferable from the documents.
-- Distinguish clearly: "present but underemphasized" (evidence exists, could be stronger) vs "missing / not evidenced" (no evidence in documents).
-- For wording suggestions: only rephrase or emphasize existing content. Never invent new experience, credentials, or accomplishments.
+- NEVER fabricate qualifications, experience, or achievements.
+- Only use evidence explicitly present in the resume/cover letter or clearly inferable form it.
+- Distinguish clearly between:
+  - "present but underemphasized": evidence exists but is not prominent, specific, or well aligned to the job description
+  - "missing / not evidenced": the resume does not provide sufficient evidence for the requirement
+- For wording suggestions, only rephrase, reorganize, or emphasize existing content. Never invent new experience, credentials, or accomplishments.
+- Do not reward mere keyword overlap when substantive evidence is weak.
+- Missing hard requirements must materially lower the score.
 
-Score each component 0-100 using the exact weights provided. The overall score must be the weighted average of components.
+TASK:
+Evaluate the candidate's fit for the job by comparing the resume/cover letter against the job description in four steps:
 
-Output valid JSON only, no markdown. Schema:
+STEP 1: Extract job requirements
+Identify the most important requirements from the job description. For each requirement:
+- write a short label
+- classify it as one of: "must_have", "strong_preference", "nice_to_have"
+- identify its type: "technical_skill", "experience", "domain", "education_certification", "leadership", "communication", "tooling", "business_scope", or "other"
+
+STEP 2: Match resume/cover letter evidence
+For each requirement, determine whether the resume/cover letter shows:
+- "strong_evidence"
+- "partial_evidence"
+- "weak_evidence"
+- "no_evidence"
+
+Include a brief evidence statement grounded in the resume/cover letter.
+
+STEP 3: Score the resume/cover letter
+Score each component 0-100 using the exact weights below. 0 is the lowest score and should indicate no match at all. 100 is the highest score, and should indicate a candidate who fulfills all parts of the component perfectly. 
+
+Score calibration:
+- 90-100: Exceptional fit. Strong evidence for nearly all must-haves and multiple strong-preference items. Resume/cover letter is already well positioned.
+- 75-89: Strong fit. Most must-haves are supported, with some gaps or underemphasis.
+- 60-74: Moderate fit. Some meaningful alignment, but one or more important requirements are weak, indirect, or insufficiently evidenced.
+- 40-59: Limited fit. Several key requirements are missing or only weakly supported.
+- 0-39: Poor fit. Major must-have requirements are absent or not evidenced.
+
+Scoring components and weights:
+1. Core requirement match (0.35)
+   Measures how well the resume/cover letter demonstrates the job's must-have qualifications. Missing hard requirements should materially reduce this score.
+
+2. Preferred requirements match (0.20)
+   Measures how well the resume/cover letter demonstrates the job's strong-preference and nice-to-have qualifications. Missing requirements should materially reduce this score.
+
+3. Technical and domain alignment (0.15)
+   Measures alignment with the technical stack, methods, and domain context. Give partial credit for adjacent experience where justified.
+
+4. Relevant impact and scope (0.125)
+   Measures whether the candidate's accomplishments, ownership, scale, and seniority align with the role.
+
+5. Evidence quality and specificity (0.075)
+   Measures whether claims are supported by specific technologies, metrics, outcomes, and clear scope.
+
+5. ATS/keyword coverage (0.05)
+   Measures whether important job-description terminology appears explicitly and naturally in the resume/cover letter. This is about discoverability, not substantive fit alone.
+
+7. Resume/cover letter clarity and positioning for this role (0.05)
+   Measures how easy it is to find and understand the most relevant qualifications for this specific role.
+
+Take into account overqualification:
+A candidate who far exceeds most or all requirements should NOT receive a score of 100, as this may indicate overqualification. These candidates should receive scores between 50 and 90. For example, if the job requires 2 years of Python experience with a preference for 4, and the candidate has 10 years of Python experience, then they should be treated as overqualified for that requirement. Smaller margins of overqualification, like 5 years of experience when 4 are asked for, should NOT be penalized.
+
+STEP 4: Recommend improvements
+Provide improvements that increase alignment without inventing facts.
+For each suggested improvement, indicate whether it addresses:
+- "present_underemphasized"
+- "missing_not_evidenced"
+
+OUTPUT:
+Return valid JSON only, no markdown.
+
+Schema:
 {
+  "requirement_assessment": [
+    {
+      "label": "requirement label",
+      "priority": "must_have|strong_preference|nice_to_have",
+      "evidence_strength": "strong_evidence|partial_evidence|weak_evidence|no_evidence",
+      "evidence": "brief grounded explanation",
+      "status": "present_underemphasized|missing_not_evidenced"
+    }
+  ],
   "strengths": ["strength1", "strength2"],
   "gaps": ["gap1 - label as 'present but underemphasized' or 'missing'"],
   "suggested_improvements": ["improvement1"],
+  "detailed_suggested_improvements": [
+    {
+      "improvement": "specific improvement",
+      "status": "present_underemphasized|missing_not_evidenced",
+      "priority": "high|medium|low"
+    },
+  ],
   "wording_suggestions": [
     {
       "current": "current or missing phrasing",
@@ -44,14 +127,16 @@ Output valid JSON only, no markdown. Schema:
   "fit_score": {
     "value": 0-100,
     "components": [
-      {"name": "Skills/experience alignment", "weight": 0.35, "score": 0-100, "explanation": "..."},
-      {"name": "Keyword/match density", "weight": 0.25, "score": 0-100, "explanation": "..."},
-      {"name": "Clarity and structure", "weight": 0.20, "score": 0-100, "explanation": "..."},
-      {"name": "Quantified achievements", "weight": 0.15, "score": 0-100, "explanation": "..."},
-      {"name": "Tailoring to role", "weight": 0.05, "score": 0-100, "explanation": "..."}
+      {"name": "Core requirement match", "weight": 0.35, "score": 0-100, "explanation": "brief explanation"},
+      {"name": "Preferred requirements match", "weight": 0.20, "score": 0-100, "explanation": "brief explanation"},
+      {"name": "Technical and domain alignment", "weight": 0.15, "score": 0-100, "explanation": "brief explanation"},
+      {"name": "Relevant impact and scope", "weight": 0.125, "score": 0-100, "explanation": "brief explanation"},
+      {"name": "Evidence quality and specificity", "weight": 0.075, "score": 0-100, "explanation": "brief explanation"},
+      {"name": "ATS/keyword coverage", "weight": 0.05, "score": 0-100, "explanation": "brief explanation"},
+      {"name": "Resume/cover letter clarity and positioning for this role", "weight": 0.05, "score": 0-100, "explanation": "brief explanation"},
     ]
   },
-  "score_rationale": "Overall rationale for the fit score"
+  "score_rationale": "Overall rationale that explains the score based on requirement coverage, missing must-haves, and strength of evidence."
 }"""
 
 
@@ -82,35 +167,50 @@ Candidate Documents:
 
 Evaluate from the hiring manager's perspective. Output JSON only."""
 
-        response = self._llm.complete(SYSTEM_PROMPT, [{"role": "user", "content": user}])
+        response = self._llm.complete(
+            SYSTEM_PROMPT, [{"role": "user", "content": user}]
+        )
         raw = _extract_json(response)
         data = json.loads(raw)
 
         # Validate and enforce our weights
         components = []
         for name, weight in EMPLOYER_RUBRIC:
-            comp_data = next((c for c in data["fit_score"]["components"] if c["name"] == name), None)
+            comp_data = next(
+                (c for c in data["fit_score"]["components"] if c["name"] == name), None
+            )
             if comp_data:
-                components.append(ScoreComponent(
-                    name=name,
-                    weight=weight,
-                    score=float(comp_data["score"]),
-                    explanation=comp_data["explanation"],
-                ))
+                components.append(
+                    ScoreComponent(
+                        name=name,
+                        weight=weight,
+                        score=float(comp_data["score"]),
+                        explanation=comp_data["explanation"],
+                    )
+                )
             else:
-                components.append(ScoreComponent(
-                    name=name,
-                    weight=weight,
-                    score=50.0,
-                    explanation="Component not provided by model",
-                ))
+                components.append(
+                    ScoreComponent(
+                        name=name,
+                        weight=weight,
+                        score=50.0,
+                        explanation="Component not provided by model",
+                    )
+                )
 
         # Recompute overall from our weights
         total_weight = sum(c.weight for c in components)
-        value = sum(c.score * c.weight for c in components) / total_weight if total_weight > 0 else 0
+        value = (
+            sum(c.score * c.weight for c in components) / total_weight
+            if total_weight > 0
+            else 0
+        )
 
         fit_score = FitScore(value=round(value, 1), components=components)
-        wording = [WordingSuggestion.model_validate(ws) for ws in data.get("wording_suggestions", [])]
+        wording = [
+            WordingSuggestion.model_validate(ws)
+            for ws in data.get("wording_suggestions", [])
+        ]
 
         return EmployerEvaluation(
             strengths=data.get("strengths", []),
