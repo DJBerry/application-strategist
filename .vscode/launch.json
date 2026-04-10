@@ -11,7 +11,7 @@
             "request": "launch",
             "program": "${file}",
             "console": "integratedTerminal",
-            "args": ["--resume", "comparison_docs\\Berry-Donald--Resume--Senior-Data-Scientist-AI-ML.txt", "--job", "comparison_docs\\job.txt"]
+            "args": ["extract", "--resume", "comparison_docs\\Berry-Donald--Resume--Senior-Data-Scientist-AI-ML.txt", "--job", "comparison_docs\\job.txt", "--cover-letter", "comparison_docs\\cover_letter.txt"]
         }
     ]
 }

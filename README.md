@@ -7,6 +7,7 @@ Job search assistance CLI — compare your resume and cover letter against job d
 - **Employer-side evaluation**: Strengths, gaps, suggested improvements, wording suggestions, fit score (0–100)
 - **Candidate-side evaluation**: Positive alignments, red flags, questions to ask, worker fit score (0–100)
 - **Follow-up REPL**: Ask follow-up questions about the evaluation with full context preserved
+- **Job description extraction** _(LangGraph)_: Structured extraction of company and role metadata, with LLM-based validation and automatic retry on errors
 
 ## Requirements
 
@@ -39,18 +40,22 @@ Job search assistance CLI — compare your resume and cover letter against job d
 
 ## Usage
 
+### Full evaluation (`analyze`)
+
+Runs both the employer-side and candidate-side evaluations, then opens a follow-up REPL.
+
 ```bash
-# Basic analysis (resume + job description)
-uv run app-strategist --resume path/to/resume.md --job path/to/job.txt
+# Resume + job description
+uv run app-strategist analyze --resume path/to/resume.md --job path/to/job.txt
 
 # With cover letter
-uv run app-strategist --resume resume.md --job job.txt --cover-letter cover.md
+uv run app-strategist analyze --resume resume.md --job job.txt --cover-letter cover.md
 
 # Verbose logging
-uv run app-strategist --resume resume.md --job job.txt -v
+uv run app-strategist analyze --resume resume.md --job job.txt -v
 ```
 
-Supported file formats: `.txt` and `.md` for resume, cover letter, and job description.
+Supported file formats: `.txt` and `.md` for all inputs.
 
 After the evaluation is displayed, you can ask follow-up questions such as:
 
@@ -60,17 +65,56 @@ After the evaluation is displayed, you can ask follow-up questions such as:
 
 Type `quit` or `exit` to leave the REPL.
 
+### Job description extraction (`extract`)
+
+Extracts structured company and role metadata from a job description using a LangGraph pipeline. The pipeline runs an extraction step, validates the result with a second LLM call, and retries any incorrect fields automatically (up to 3 total attempts).
+
+```bash
+# Extract from a job description
+uv run app-strategist extract --resume path/to/resume.md --job path/to/job.txt
+
+# With cover letter (carried through for future pipeline steps)
+uv run app-strategist extract --resume resume.md --job job.txt --cover-letter cover.md
+
+# Verbose logging (shows graph node execution and attempt count)
+uv run app-strategist extract --resume resume.md --job job.txt -v
+```
+
+Output is a JSON object with two sections:
+
+```json
+{
+  "company_info": {
+    "company_name": "Acme Corp",
+    "company_description": "A widget manufacturer",
+    "company_mission": "Build tools that delight developers"
+  },
+  "job_info": {
+    "title": "Senior Software Engineer",
+    "seniority_level": "Senior",
+    "location": "Austin, TX",
+    "work_environment": "hybrid"
+  }
+}
+```
+
+Fields that cannot be found in the job description are set to `"N/A"`. If validation still fails after 3 attempts, the best-effort data is shown along with a warning panel listing the unresolved concerns.
+
 ## Development
 
 ```bash
-# Run tests
+# Run all tests
 uv run pytest tests/ -v
+
+# Run only the graph tests
+uv run pytest tests/test_graph/ -v
 ```
 
 ## Project Structure
 
 ```
 src/app_strategist/
+├── graph/         # LangGraph extraction pipeline (state, nodes, prompts, graph)
 ├── llm/           # LLM provider abstraction (Anthropic, OpenAI)
 ├── parsers/       # File parsing (extensible for PDF, DOCX, URLs)
 ├── models/        # Pydantic evaluation models

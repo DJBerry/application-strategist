@@ -44,7 +44,7 @@ def test_analyze_missing_resume_file(sample_job: Path, tmp_path: Path) -> None:
     ):
         result = runner.invoke(
             app,
-            ["--resume", str(fake_resume), "--job", str(sample_job)],
+            ["analyze", "--resume", str(fake_resume), "--job", str(sample_job)],
         )
 
     assert result.exit_code == 1
@@ -59,7 +59,7 @@ def test_analyze_missing_api_key(sample_resume: Path, sample_job: Path) -> None:
     ):
         result = runner.invoke(
             app,
-            ["--resume", str(sample_resume), "--job", str(sample_job)],
+            ["analyze", "--resume", str(sample_resume), "--job", str(sample_job)],
         )
 
     assert result.exit_code == 1

@@ -9,7 +9,7 @@ from app_strategist.llm.base import LLMProvider
 logger = logging.getLogger(__name__)
 
 DEFAULT_MODEL = "gpt-5.2"  # "gpt-5.2"  # "gpt-4o"
-DEFAULT_MAX_TOKENS = 4096
+DEFAULT_MAX_TOKENS = 8192  # 4096
 
 
 class OpenAIProvider:
