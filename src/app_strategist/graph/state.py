@@ -39,8 +39,11 @@ class GraphState(TypedDict):
     validation_passed: bool
     # Schema:
     #   {
-    #     "all_correct": bool,
-    #     "incorrect_fields": [
+    #     "all_correct": bool,          # true when incorrect_fields is empty
+    #     "incorrect_fields": [         # factually wrong / fabricated values
+    #       {"field": str, "extracted_value": str, "explanation": str}
+    #     ],
+    #     "ambiguous_fields": [         # valid reading but has nuance/caveats
     #       {"field": str, "extracted_value": str, "explanation": str}
     #     ]
     #   }
@@ -49,3 +52,8 @@ class GraphState(TypedDict):
     # Retry tracking
     attempt_count: int       # incremented by extract_node and retry_node; max 3
     unresolved_concerns: list[str]  # populated by finalize_node when max retries exceeded
+
+    # Ambiguous field caveats — set by check_node, accumulated across iterations
+    # Each entry: {"field": str, "extracted_value": str, "explanation": str}
+    # Carries nuance to downstream nodes and the renderer without blocking routing.
+    field_caveats: list[dict]

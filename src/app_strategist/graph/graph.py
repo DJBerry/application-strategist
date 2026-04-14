@@ -97,6 +97,7 @@ def run_extraction(
         "validation_result": None,
         "attempt_count": 0,
         "unresolved_concerns": [],
+        "field_caveats": [],
     }
 
     logger.debug("run_extraction: starting graph")

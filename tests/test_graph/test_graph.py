@@ -35,7 +35,7 @@ SAMPLE_EXTRACTED = {
     },
 }
 
-CHECK_PASS = json.dumps({"all_correct": True, "incorrect_fields": []})
+CHECK_PASS = json.dumps({"all_correct": True, "incorrect_fields": [], "ambiguous_fields": []})
 
 CHECK_FAIL_NAME = json.dumps({
     "all_correct": False,
@@ -46,6 +46,7 @@ CHECK_FAIL_NAME = json.dumps({
             "explanation": "The job description says 'Acme Corporation'",
         }
     ],
+    "ambiguous_fields": [],
 })
 
 CORRECTED_NAME = json.dumps({"company_info": {"company_name": "Acme Corporation"}})
@@ -98,6 +99,7 @@ def test_success_on_first_try():
         "validation_result": None,
         "attempt_count": 0,
         "unresolved_concerns": [],
+        "field_caveats": [],
     })
 
     assert result["validation_passed"] is True
@@ -127,6 +129,7 @@ def test_retry_then_success():
         "validation_result": None,
         "attempt_count": 0,
         "unresolved_concerns": [],
+        "field_caveats": [],
     })
 
     assert result["validation_passed"] is True
@@ -159,6 +162,7 @@ def test_max_retries_exceeded():
         "validation_result": None,
         "attempt_count": 0,
         "unresolved_concerns": [],
+        "field_caveats": [],
     })
 
     assert result["validation_passed"] is False
@@ -182,7 +186,7 @@ def test_run_extraction_returns_full_state():
     expected_keys = {
         "job_description", "resume", "cover_letter",
         "extracted_data", "validation_passed", "validation_result",
-        "attempt_count", "unresolved_concerns",
+        "attempt_count", "unresolved_concerns", "field_caveats",
     }
     assert expected_keys.issubset(result.keys())
     assert result["job_description"] == SAMPLE_JD
@@ -215,3 +219,27 @@ def test_extracted_data_has_required_structure():
     assert "job_info" in data
     assert "company_name" in data["company_info"]
     assert "work_environment" in data["job_info"]
+
+
+def test_ambiguous_field_does_not_cause_retry():
+    """Ambiguous field alone → graph ends after 2 LLM calls, no retry."""
+    check_with_ambiguous = json.dumps({
+        "all_correct": True,
+        "incorrect_fields": [],
+        "ambiguous_fields": [
+            {
+                "field": "job_info.work_environment",
+                "extracted_value": "remote",
+                "explanation": "Correct for most staff, but JD notes hybrid near HQ",
+            }
+        ],
+    })
+    llm = MockLLMSequence([json.dumps(SAMPLE_EXTRACTED), check_with_ambiguous])
+
+    result = run_extraction(job_description=SAMPLE_JD, llm=llm)
+
+    assert result["validation_passed"] is True
+    assert result["unresolved_concerns"] == []
+    assert len(result["field_caveats"]) == 1
+    assert result["field_caveats"][0]["field"] == "job_info.work_environment"
+    assert llm.call_count == 2

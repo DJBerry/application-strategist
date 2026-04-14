@@ -15,7 +15,10 @@ description provided by the user.
 
 Rules:
 - Only use information that is explicitly stated in the job description.
-- If a field is not mentioned or cannot be determined, use the string "N/A".
+- Extract the most relevant available text for each field, even if it is not \
+  explicitly labeled as such (e.g., use a "we exist to..." statement as the \
+  mission if no formal mission is given). Only use "N/A" when no relevant \
+  information is present at all.
 - "work_environment" must be exactly one of: "remote", "hybrid", "on-site", "N/A".
 - Do not fabricate, infer, or guess any values.
 - Output a raw JSON object only — no markdown fences, no prose, no explanation.
@@ -50,33 +53,49 @@ CHECK_SYSTEM_PROMPT = """\
 You are a data validator. You will receive extracted job description data and \
 the original job description text.
 
-Your task: verify whether each extracted field accurately reflects what is \
-stated in the job description.
+Your task: classify each extracted field as correct, incorrect, or ambiguous.
 
-Validation rules:
-- A field is correct if its value matches what is explicitly written in the \
-  job description, or if it is "N/A" and the information is genuinely absent.
-- A field is incorrect if it contains fabricated, hallucinated, or meaningfully \
-  wrong information, or if "N/A" is used when the real value is present in the text.
+Classifications:
+- INCORRECT: the extracted value directly contradicts what is written in the \
+  job description, is fabricated, or "N/A" was returned when relevant text is \
+  clearly present. These fields must be re-extracted.
+- AMBIGUOUS: the extracted value is a valid reading of the job description, but \
+  the job description also contains conditions or caveats that qualify it \
+  (e.g., "remote, but hybrid near HQ"). The extracted value is not wrong — it \
+  just has nuance worth noting. Do NOT use ambiguous for fields where "N/A" was \
+  used incorrectly; that is incorrect.
+- CORRECT: the value accurately reflects what is stated and needs no action.
+
+Rules:
+- Never put the same field in both incorrect_fields and ambiguous_fields.
+- Set all_correct to true when incorrect_fields is empty. Ambiguous fields \
+  alone do not block the "all correct" result.
 - "work_environment" must be one of: "remote", "hybrid", "on-site", "N/A".
 - Do not penalise minor wording differences as long as the meaning is accurate.
-
-Output a raw JSON object only — no markdown fences, no prose.
+- Output a raw JSON object only — no markdown fences, no prose.
 
 Return this exact structure:
 {
   "all_correct": true,
-  "incorrect_fields": []
+  "incorrect_fields": [],
+  "ambiguous_fields": []
 }
 
-Or, if there are errors:
+Example showing the distinction:
 {
   "all_correct": false,
   "incorrect_fields": [
     {
-      "field": "company_info.company_name",
-      "extracted_value": "the value that was extracted",
-      "explanation": "what is wrong and what the correct value should be"
+      "field": "company_info.company_mission",
+      "extracted_value": "N/A",
+      "explanation": "JD contains 'we exist to empower developers' which should have been extracted as the mission"
+    }
+  ],
+  "ambiguous_fields": [
+    {
+      "field": "job_info.work_environment",
+      "extracted_value": "remote",
+      "explanation": "Correct for most staff, but JD notes hybrid arrangement for candidates near HQ"
     }
   ]
 }"""

@@ -68,15 +68,26 @@ def make_check_node(llm: LLMProvider) -> Callable[[GraphState], dict]:
         response = llm.complete(CHECK_SYSTEM_PROMPT, [{"role": "user", "content": user}])
         raw = extract_json(response)
         validation_result = json.loads(raw)
-        passed = bool(validation_result.get("all_correct", False))
+
+        ambiguous_fields: list[dict] = validation_result.get("ambiguous_fields", [])
+        merged_caveats = state.get("field_caveats", []) + ambiguous_fields
+
+        # Validation passes when there are no incorrect fields; ambiguous fields
+        # do not block the "ok" routing path.
+        passed = not bool(validation_result.get("incorrect_fields"))
         if passed:
             logger.debug("check_node: validation passed")
         else:
             bad = [f["field"] for f in validation_result.get("incorrect_fields", [])]
             logger.debug("check_node: validation failed — incorrect fields: %s", bad)
+        if ambiguous_fields:
+            ambig = [f["field"] for f in ambiguous_fields]
+            logger.debug("check_node: ambiguous fields (stored as caveats): %s", ambig)
+
         return {
             "validation_passed": passed,
             "validation_result": validation_result,
+            "field_caveats": merged_caveats,
         }
 
     return check_node

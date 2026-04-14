@@ -188,6 +188,19 @@ def extract(
                     border_style="yellow",
                 )
             )
+
+        if final_state["field_caveats"]:
+            notes_text = "\n".join(
+                f"  • {c['field']}: {c['explanation']}"
+                for c in final_state["field_caveats"]
+            )
+            console.print(
+                Panel(
+                    notes_text,
+                    title="[bold blue]Extraction Notes[/bold blue]",
+                    border_style="blue",
+                )
+            )
     except FileNotFoundError as e:
         console.print(f"[red]Error:[/red] {e}")
         raise typer.Exit(1)

@@ -68,6 +68,7 @@ def _base_state(**overrides) -> dict:
         "validation_result": None,
         "attempt_count": 0,
         "unresolved_concerns": [],
+        "field_caveats": [],
     }
     state.update(overrides)
     return state
@@ -112,11 +113,11 @@ def test_extract_node_with_markdown_fences():
 # ---------------------------------------------------------------------------
 
 def _check_pass_response() -> str:
-    return json.dumps({"all_correct": True, "incorrect_fields": []})
+    return json.dumps({"all_correct": True, "incorrect_fields": [], "ambiguous_fields": []})
 
 
 def _check_fail_response(incorrect_fields: list[dict]) -> str:
-    return json.dumps({"all_correct": False, "incorrect_fields": incorrect_fields})
+    return json.dumps({"all_correct": False, "incorrect_fields": incorrect_fields, "ambiguous_fields": []})
 
 
 def test_check_node_passes():
@@ -158,6 +159,100 @@ def test_check_node_with_markdown_fences():
     result = node(_base_state(extracted_data=SAMPLE_EXTRACTED, attempt_count=1))
 
     assert result["validation_passed"] is True
+
+
+def test_check_node_returns_caveats():
+    """ambiguous_fields → validation_passed=True, field_caveats populated."""
+    ambiguous = [
+        {
+            "field": "job_info.work_environment",
+            "extracted_value": "remote",
+            "explanation": "Correct for most staff, but JD notes hybrid near HQ",
+        }
+    ]
+    response = json.dumps({"all_correct": True, "incorrect_fields": [], "ambiguous_fields": ambiguous})
+    llm = MockLLM([response])
+    node = make_check_node(llm)
+
+    result = node(_base_state(extracted_data=SAMPLE_EXTRACTED, attempt_count=1))
+
+    assert result["validation_passed"] is True
+    assert len(result["field_caveats"]) == 1
+    assert result["field_caveats"][0]["field"] == "job_info.work_environment"
+    assert "hybrid near HQ" in result["field_caveats"][0]["explanation"]
+
+
+def test_check_node_accumulates_caveats_across_iterations():
+    """New ambiguous_fields are appended to existing field_caveats."""
+    existing_caveat = {
+        "field": "company_info.company_mission",
+        "extracted_value": "N/A",
+        "explanation": "Mission was inferred",
+    }
+    new_ambiguous = [
+        {
+            "field": "job_info.work_environment",
+            "extracted_value": "remote",
+            "explanation": "Hybrid caveat applies near HQ",
+        }
+    ]
+    response = json.dumps({"all_correct": True, "incorrect_fields": [], "ambiguous_fields": new_ambiguous})
+    llm = MockLLM([response])
+    node = make_check_node(llm)
+
+    state = _base_state(
+        extracted_data=SAMPLE_EXTRACTED,
+        attempt_count=2,
+        field_caveats=[existing_caveat],
+    )
+    result = node(state)
+
+    assert len(result["field_caveats"]) == 2
+    fields = [c["field"] for c in result["field_caveats"]]
+    assert "company_info.company_mission" in fields
+    assert "job_info.work_environment" in fields
+
+
+def test_check_node_ambiguous_does_not_block_ok_route():
+    """route_after_check returns 'ok' when validation_passed=True even with caveats."""
+    caveat = {
+        "field": "job_info.work_environment",
+        "extracted_value": "remote",
+        "explanation": "Hybrid near HQ",
+    }
+    state = _base_state(
+        validation_passed=True,
+        attempt_count=1,
+        field_caveats=[caveat],
+    )
+    assert route_after_check(state) == "ok"
+
+
+def test_check_node_mixed_incorrect_and_ambiguous():
+    """When both lists are present, validation_passed=False and field_caveats is populated."""
+    incorrect = [
+        {
+            "field": "company_info.company_name",
+            "extracted_value": "Acme Corp",
+            "explanation": "Should be 'Acme Corporation'",
+        }
+    ]
+    ambiguous = [
+        {
+            "field": "job_info.work_environment",
+            "extracted_value": "remote",
+            "explanation": "Hybrid caveat near HQ",
+        }
+    ]
+    response = json.dumps({"all_correct": False, "incorrect_fields": incorrect, "ambiguous_fields": ambiguous})
+    llm = MockLLM([response])
+    node = make_check_node(llm)
+
+    result = node(_base_state(extracted_data=SAMPLE_EXTRACTED, attempt_count=1))
+
+    assert result["validation_passed"] is False
+    assert len(result["field_caveats"]) == 1
+    assert result["field_caveats"][0]["field"] == "job_info.work_environment"
 
 
 # ---------------------------------------------------------------------------
