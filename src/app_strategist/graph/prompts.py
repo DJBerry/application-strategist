@@ -143,3 +143,177 @@ Fields that need to be re-extracted:
 {incorrect_fields}
 
 Re-extract only these fields. Output JSON only."""
+
+
+# ---------------------------------------------------------------------------
+# EXTRACT_REQUIREMENTS — extract all requirements from the job description
+# ---------------------------------------------------------------------------
+
+EXTRACT_REQUIREMENTS_SYSTEM_PROMPT = """\
+You are a job description analyst. Extract every requirement mentioned in the \
+job description provided by the user.
+
+Rules:
+- Only extract requirements explicitly stated in the job description. Do not \
+  infer, assume, or add requirements that are not directly present in the text.
+- If the same skill or qualification appears in multiple places in the JD, \
+  produce ONE requirement that captures the fullest description — do not \
+  create separate duplicates.
+- If a JD bullet bundles multiple distinct qualifications together \
+  (e.g., "experience with Python and deploying ML models to production"), split \
+  them into separate requirements unless they are genuinely inseparable.
+- For each requirement's description: rephrase for clarity and consistency \
+  rather than copying JD language verbatim, but do NOT add qualifications, \
+  thresholds, or conditions that are not present in the source text. Capture \
+  all relevant nuance, conditions, and flexibility stated in the JD \
+  (e.g., if education can substitute for years of experience, include that).
+- Determine priority from the JD's own language cues:
+    "must", "required", "minimum", "mandatory"  → "minimum_requirement"
+    "preferred", "desired", "ideal", "important" → "preferred_requirement"
+    "bonus", "plus", "nice to have", "a plus"   → "nice_to_have"
+    unclear or contradictory language            → "ambiguous"
+- Do not fabricate, infer, or guess any values.
+- Output a raw JSON object only — no markdown fences, no prose, no explanation.
+
+Return this exact structure:
+{
+  "requirements": [
+    {
+      "label": "Short human-readable label, e.g. 'Python proficiency'",
+      "description": "Full description capturing all JD nuance and conditions",
+      "priority": "minimum_requirement|preferred_requirement|nice_to_have|ambiguous"
+    }
+  ]
+}"""
+
+EXTRACT_REQUIREMENTS_USER_TEMPLATE = """\
+Job Description:
+{job_description}
+
+---
+Company and Job Context (from earlier extraction — use for context only):
+Company Info:
+{company_info}
+
+Job Info:
+{job_info}
+
+Extract all requirements from the job description. Output JSON only."""
+
+
+# ---------------------------------------------------------------------------
+# VALIDATE_REQUIREMENTS — review extracted requirements for quality
+# ---------------------------------------------------------------------------
+
+VALIDATE_REQUIREMENTS_SYSTEM_PROMPT = """\
+You are a requirements validator. You will receive an extracted requirements \
+list and the original job description. Review the extraction for four things:
+
+1. COMPLETENESS: Are any requirements from the JD missing from the list?
+2. ACCURACY: Does each requirement's description faithfully reflect what the \
+   JD says, without hallucination or invention? Flag any description that adds \
+   information (qualifications, thresholds, conditions) not present in the \
+   source text.
+3. PRIORITY CORRECTNESS: Is the priority label reasonable given the language \
+   used in the JD?
+4. DUPLICATES: Are any requirements duplicates or substantially overlapping? \
+   If so, the correction must MERGE them into a single requirement with the \
+   most complete description — not simply delete one.
+
+Behavioural guidelines — be pragmatic, not pedantic:
+- Only flag CLEAR problems. Do not nitpick borderline cases.
+- Tolerate ambiguity: if a priority could reasonably go either way, that is \
+  NOT an error. If the JD language is genuinely unclear, "ambiguous" is an \
+  acceptable and correct label — do not flag it.
+- Do NOT trigger an issue over disagreements that are matters of interpretation. \
+  If the extraction captures nuance faithfully (even in different words), do \
+  not flag it.
+- Set all_correct to true when issues is empty.
+- Output a raw JSON object only — no markdown fences, no prose.
+
+Issue types:
+- "missing"       — a requirement is present in the JD but absent from the list
+- "inaccurate"    — a requirement's description adds or misrepresents information
+- "wrong_priority"— the priority label is clearly inconsistent with JD language
+- "duplicate"     — two requirements are substantially overlapping; correction merges them
+
+Return this exact structure:
+{
+  "all_correct": true,
+  "issues": []
+}
+
+When issues exist:
+{
+  "all_correct": false,
+  "issues": [
+    {
+      "type": "missing|inaccurate|wrong_priority|duplicate",
+      "label": "label of the problematic requirement, or null for missing",
+      "duplicate_of": "label of the other requirement (duplicate type only), or null",
+      "problem": "clear explanation of the problem",
+      "correction": {
+        "label": "corrected label",
+        "description": "corrected description",
+        "priority": "corrected priority"
+      }
+    }
+  ]
+}"""
+
+VALIDATE_REQUIREMENTS_USER_TEMPLATE = """\
+Original Job Description:
+{job_description}
+
+---
+Extracted Requirements:
+{requirements}
+
+Validate the requirements. Output JSON only."""
+
+
+# ---------------------------------------------------------------------------
+# CORRECT_REQUIREMENTS — apply validator corrections to the requirements list
+# ---------------------------------------------------------------------------
+
+# NOTE: {issues} is a pre-formatted human-readable string built in nodes.py,
+# not raw JSON.  This avoids brace-escaping conflicts with str.format().
+CORRECT_REQUIREMENTS_SYSTEM_PROMPT_TEMPLATE = """\
+You are a job description analyst. A previous extraction of requirements \
+contained some issues. Apply ONLY the listed corrections to the requirements \
+list — do not re-extract from scratch.
+
+Issues to fix:
+{issues}
+
+Rules for applying corrections:
+- "missing": add the correction object as a new requirement to the list.
+- "inaccurate" or "wrong_priority": replace the named requirement with the \
+  correction object. Keep all other requirements unchanged.
+- "duplicate": replace BOTH named requirements with the single merged correction \
+  object. Do not keep either of the originals.
+- Do NOT change any requirement that is not named in the issues list.
+- Do not fabricate, infer, or add any information beyond what the JD contains.
+- Output a raw JSON object only — no markdown fences, no prose, no explanation.
+
+Return the full updated requirements list in this exact structure:
+{{
+  "requirements": [
+    {{
+      "label": "...",
+      "description": "...",
+      "priority": "minimum_requirement|preferred_requirement|nice_to_have|ambiguous"
+    }}
+  ]
+}}"""
+
+CORRECT_REQUIREMENTS_USER_TEMPLATE = """\
+Job Description:
+{job_description}
+
+---
+Current Requirements List:
+{requirements}
+
+Apply the corrections and return the full updated requirements list. \
+Output JSON only."""

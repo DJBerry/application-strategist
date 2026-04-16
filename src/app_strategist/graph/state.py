@@ -57,3 +57,30 @@ class GraphState(TypedDict):
     # Each entry: {"field": str, "extracted_value": str, "explanation": str}
     # Carries nuance to downstream nodes and the renderer without blocking routing.
     field_caveats: list[dict]
+
+    # Requirements extracted from the job description
+    # Schema: [{"label": str, "description": str, "priority": str}, ...]
+    # priority is one of: "minimum_requirement", "preferred_requirement",
+    #                      "nice_to_have", "ambiguous"
+    job_requirements: list[dict] | None
+
+    # Validation output for requirements extraction
+    requirements_validation_passed: bool
+    # Schema:
+    #   {
+    #     "all_correct": bool,
+    #     "issues": [
+    #       {
+    #         "type": "missing" | "inaccurate" | "wrong_priority" | "duplicate",
+    #         "label": str | None,         # null for missing; label of requirement otherwise
+    #         "duplicate_of": str | None,  # label of the other requirement (duplicate only)
+    #         "problem": str,
+    #         "correction": {"label": str, "description": str, "priority": str}
+    #       }
+    #     ]
+    #   }
+    requirements_validation_result: dict | None
+
+    # Retry tracking for requirements extraction (independent of extraction attempt_count)
+    requirements_attempt_count: int
+    requirements_warnings: list[str]  # populated by finalize_requirements_node on exhaustion
