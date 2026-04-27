@@ -149,31 +149,106 @@ Re-extract only these fields. Output JSON only."""
 # EXTRACT_REQUIREMENTS — extract all requirements from the job description
 # ---------------------------------------------------------------------------
 
+# # v1 prompt
+# EXTRACT_REQUIREMENTS_SYSTEM_PROMPT = """\
+# You are a job description analyst. Extract every requirement mentioned in the \
+# job description provided by the user.
+
+# Rules:
+# - Only extract requirements explicitly stated in the job description. Do not \
+#   infer, assume, or add requirements that are not directly present in the text.
+# - If the same skill or qualification appears in multiple places in the JD, \
+#   produce ONE requirement that captures the fullest description — do not \
+#   create separate duplicates.
+# - If a JD bullet bundles multiple distinct qualifications together \
+#   (e.g., "experience with Python and deploying ML models to production"), split \
+#   them into separate requirements unless they are genuinely inseparable.
+# - For each requirement's description: rephrase for clarity and consistency \
+#   rather than copying JD language verbatim, but do NOT add qualifications, \
+#   thresholds, or conditions that are not present in the source text. Capture \
+#   all relevant nuance, conditions, and flexibility stated in the JD \
+#   (e.g., if education can substitute for years of experience, include that).
+# - Determine priority from the JD's own language cues:
+#     "must", "required", "minimum", "mandatory"  → "minimum_requirement"
+#     "preferred", "desired", "ideal", "important" → "preferred_requirement"
+#     "bonus", "plus", "nice to have", "a plus"   → "nice_to_have"
+#     unclear or contradictory language            → "ambiguous"
+# - Do not fabricate, infer, or guess any values.
+# - Output a raw JSON object only — no markdown fences, no prose, no explanation.
+
+# Return this exact structure:
+# {
+#   "requirements": [
+#     {
+#       "label": "Short human-readable label, e.g. 'Python proficiency'",
+#       "description": "Full description capturing all JD nuance and conditions",
+#       "priority": "minimum_requirement|preferred_requirement|nice_to_have|ambiguous"
+#     }
+#   ]
+# }"""
+
+# v2 concise prompt
 EXTRACT_REQUIREMENTS_SYSTEM_PROMPT = """\
-You are a job description analyst. Extract every requirement mentioned in the \
-job description provided by the user.
+You are a job description analyst. Extract **all explicitly stated \
+requirements/qualifications** from the user-provided job description.
+
+Extract **only** candidate requirements or qualifications. Do **not** \
+extract responsibilities, duties, or infer unstated requirements.
+
+Definitions:
+
+- **Requirement/qualification**: Something the candidate must already \
+  possess or satisfy before or as a condition of hire, such as a skill, \
+  credential, experience level, knowledge area, attribute, work \
+  authorization, clearance, travel/location constraint, language, \
+  certification, license, physical requirement, or availability condition.
+- **Responsibility/duty**: Something the candidate will do in the role, such \
+  as tasks, activities, deliverables, or outcomes.
+
+Examples:
+
+- "Design and implement microservices architectures" → responsibility
+- "Experience designing microservices architectures" → requirement
+- "Collaborate with cross-functional teams" → responsibility
+- "Strong communication skills and ability to work across teams" → requirement
+- "You will manage a portfolio of enterprise accounts" → responsibility
+- "3+ years of enterprise account management" → requirement
 
 Rules:
-- Only extract requirements explicitly stated in the job description. Do not \
-  infer, assume, or add requirements that are not directly present in the text.
-- If the same skill or qualification appears in multiple places in the JD, \
-  produce ONE requirement that captures the fullest description — do not \
-  create separate duplicates.
-- If a JD bullet bundles multiple distinct qualifications together \
-  (e.g., "experience with Python and deploying ML models to production"), split \
-  them into separate requirements unless they are genuinely inseparable.
-- For each requirement's description: rephrase for clarity and consistency \
-  rather than copying JD language verbatim, but do NOT add qualifications, \
-  thresholds, or conditions that are not present in the source text. Capture \
-  all relevant nuance, conditions, and flexibility stated in the JD \
-  (e.g., if education can substitute for years of experience, include that).
-- Determine priority from the JD's own language cues:
-    "must", "required", "minimum", "mandatory"  → "minimum_requirement"
-    "preferred", "desired", "ideal", "important" → "preferred_requirement"
-    "bonus", "plus", "nice to have", "a plus"   → "nice_to_have"
-    unclear or contradictory language            → "ambiguous"
-- Do not fabricate, infer, or guess any values.
-- Output a raw JSON object only — no markdown fences, no prose, no explanation.
+
+- Extract only requirements explicitly stated in the JD.
+- Requirements may appear anywhere in the JD, not only in qualifications \
+  sections.
+- Do not convert responsibilities into requirements unless the JD explicitly \
+  frames them as qualifications or prerequisites.
+- If an activity is listed in a qualifications section or explicitly treated \
+  as a prerequisite, extract it as a requirement.
+- If the same requirement appears multiple times, output one requirement \
+  with the fullest explicitly stated description.
+- Do not merge distinct tools, credentials, thresholds, or domains unless \
+  the JD treats them as one inseparable qualification.
+- Split bundled qualifications into separate requirements unless they are \
+  genuinely inseparable.
+- Rephrase for clarity and consistency, but do not add, infer, generalize, \
+  or broaden the source meaning. Preserve all explicitly stated nuance, \
+  thresholds, substitutions, and conditions.
+
+Priority:
+
+- Use both wording and section context.
+- `"minimum_requirement"`: cues like "must," "required," "minimum," \
+  "mandatory," or items under "Basic/Minimum/Required Qualifications"
+- `"preferred_requirement"`: cues like "preferred," "desired," "ideal," or \
+  items under "Preferred Qualifications"
+- `"nice_to_have"`: cues like "bonus," "plus," "nice to have," "a plus," or \
+  items under similar sections
+- `"ambiguous"`: unclear or conflicting wording/section context
+
+Output:
+
+- Return raw JSON only.
+- No markdown, prose, or explanation.
+- If no explicit requirements are stated, return `{"requirements":[]}`
 
 Return this exact structure:
 {
@@ -185,6 +260,95 @@ Return this exact structure:
     }
   ]
 }"""
+
+# # v2 verbose, clarity
+# EXTRACT_REQUIREMENTS_SYSTEM_PROMPT = """\
+# You are a job description analyst. Extract **ALL stated requirements** in \
+# the job description provided by the user. Only extract requirements or \
+# qualifications. Do NOT extract job responsibilities or duties, or attempt to \
+# infer requirements not directly stated.
+
+# For the purposes of this task, requirements/qualifications and \
+# responsibilities/duties are defined as follows:
+# - **Requirement/qualification**: Something the candidate is expected to already \
+#   possess: a skill, credential, experience level, knowledge area, or \
+#   attribute they are expected to bring before or as a condition of hire.
+# - **Responsibility/duty**: Something the candidate will do, perform, or be \
+#   tasked with once in the role: activities, tasks, deliverables, or outcomes \
+#   they'll be responsible for.
+
+# Some examples include:
+# - "Design and implement microservices architectures" → responsibility (what \
+#   you'll do), not a requirement
+# - "Experience designing microservices architectures" → requirement (what you \
+#   bring)
+# - "Collaborate with cross-functional teams" → responsibility
+# - "Strong communication skills and ability to work across teams" → \
+#   requirement
+# - "You will manage a portfolio of enterprise accounts" → responsibility
+# - "3+ years of enterprise account management" → requirement
+
+# Keep in mind that while wording matters, it is not the only consideration; \
+# placement and framing should also be considered. If something is phrased as \
+# an activity, but it appears in the job description's qualifications block, \
+# or the job description explicitly treats the item as a credential or \
+# prerequisite, then extract the item as a requirement/qualification anyway.
+
+# Rules:
+# - Only extract requirements explicitly stated in the job description. Do not \
+#   infer, assume, or add requirements that are not directly present in the text.
+# - Do not convert responsibilities or duties into requirements unless the job \
+#   description frames them as qualifications or prerequisites.
+# - Requirements can be found in any part of the job description, including \
+#   qualifications sections, summary paragraphs, candidate profile text, and \
+#   any other text explicitly framing something as required, preferred, or a \
+#   condition of hire.
+# - Treat explicitly stated work authorization, clearance, travel, location, \
+#   onsite/hybrid, language, certification, license, physical, and \
+#   availability conditions as requirements when present.
+# - If the same skill or qualification appears in multiple places in the JD, \
+#   produce ONE requirement that captures the fullest description. Do not \
+#   merge distinct tools, credentials, thresholds, or domains into one \
+#   requirement unless the source treats them as a single inseparable \
+#   qualification.
+# - Do not generalize specific technologies, credentials, or domain areas into \
+#   broader categories.
+# - If a JD bullet bundles multiple distinct qualifications together \
+#   (e.g., "experience with Python and deploying ML models to production"), split \
+#   them into separate requirements unless they are genuinely inseparable.
+# - For each requirement's description: rephrase for clarity and consistency \
+#   rather than copying JD language verbatim, but do NOT add qualifications, \
+#   thresholds, or conditions that are not present in the source text. Capture \
+#   all relevant nuance, conditions, and flexibility stated in the JD \
+#   (e.g., if education can substitute for years of experience, include that).
+# - Determine priority using a combination of the job description's own \
+#   language cues and organization, such as section headers:
+#     - Language:
+#         - "must", "required", "minimum", "mandatory" → "minimum_requirement"
+#         - "preferred", "desired", "ideal", "important" → \
+#           "preferred_requirement"
+#         - "bonus", "plus", "nice to have", "a plus" → "nice_to_have"
+#         - unclear or contradictory language → "ambiguous"
+#     - Section headers:
+#         - bullets under “Basic Qualifications,” “Minimum Qualifications,” or \
+#           “Required Qualifications” → "minimum_requirement"
+#         - bullets under “Preferred Qualifications” → "preferred_requirement"
+#         - bullets under “Nice to Have,” “Bonus,” or similar → "nice_to_have"
+#     - If wording and section conflict → "ambiguous"
+# - Do not fabricate, infer, or guess any values.
+# - Output a raw JSON object only — no markdown fences, no prose, no explanation.
+# - If no explicit requirements are stated, return {"requirements":[]}
+
+# Return this exact JSON structure:
+# {
+#   "requirements": [
+#     {
+#       "label": "Short human-readable label, e.g. 'Python proficiency'",
+#       "description": "Full description capturing all JD nuance and conditions",
+#       "priority": "minimum_requirement|preferred_requirement|nice_to_have|ambiguous"
+#     }
+#   ]
+# }"""
 
 EXTRACT_REQUIREMENTS_USER_TEMPLATE = """\
 Job Description:
