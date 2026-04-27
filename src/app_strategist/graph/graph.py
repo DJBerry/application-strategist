@@ -11,9 +11,16 @@ START → extract → check → [conditional]
                             └─ "give_up" → finalize → extract_requirements
 
 extract_requirements → validate_requirements → [conditional]
-                            ├─ "ok"      → END
+                            ├─ "ok"      → extract_implicit_requirements
                             ├─ "retry"   → correct_requirements → validate_requirements (loop)
-                            └─ "give_up" → finalize_requirements → END
+                            └─ "give_up" → finalize_requirements → extract_implicit_requirements
+
+extract_implicit_requirements → validate_implicit_requirements → [conditional]
+                            ├─ "ok"      → deduplicate_requirements
+                            ├─ "retry"   → correct_implicit_requirements → validate_implicit_requirements (loop)
+                            └─ "give_up" → finalize_implicit_requirements → deduplicate_requirements
+
+deduplicate_requirements → END
 """
 
 import logging
@@ -25,14 +32,20 @@ from app_strategist.config import get_llm_provider
 from app_strategist.graph.nodes import (
     finalize_node,
     finalize_requirements_node,
+    finalize_implicit_requirements_node,
     make_check_node,
     make_correct_requirements_node,
+    make_correct_implicit_requirements_node,
+    make_deduplicate_requirements_node,
     make_extract_node,
     make_extract_requirements_node,
+    make_extract_implicit_requirements_node,
     make_retry_node,
     make_validate_requirements_node,
+    make_validate_implicit_requirements_node,
     route_after_check,
     route_after_requirements_validation,
+    route_implicit_requirements,
 )
 from app_strategist.graph.state import GraphState
 
@@ -68,6 +81,15 @@ def build_extraction_graph(llm: "LLMProvider | None" = None):
     graph.add_node("correct_requirements", make_correct_requirements_node(_llm))
     graph.add_node("finalize_requirements", finalize_requirements_node)
 
+    # --- implicit requirements extraction nodes ---
+    graph.add_node("extract_implicit_requirements", make_extract_implicit_requirements_node(_llm))
+    graph.add_node("validate_implicit_requirements", make_validate_implicit_requirements_node(_llm))
+    graph.add_node("correct_implicit_requirements", make_correct_implicit_requirements_node(_llm))
+    graph.add_node("finalize_implicit_requirements", finalize_implicit_requirements_node)
+
+    # --- cross-list deduplication node ---
+    graph.add_node("deduplicate_requirements", make_deduplicate_requirements_node(_llm))
+
     # --- metadata extraction loop ---
     graph.set_entry_point("extract")
     graph.add_edge("extract", "check")
@@ -89,13 +111,28 @@ def build_extraction_graph(llm: "LLMProvider | None" = None):
         "validate_requirements",
         route_after_requirements_validation,
         {
-            "ok": END,
+            "ok": "extract_implicit_requirements",
             "retry": "correct_requirements",
             "give_up": "finalize_requirements",
         },
     )
     graph.add_edge("correct_requirements", "validate_requirements")
-    graph.add_edge("finalize_requirements", END)
+    graph.add_edge("finalize_requirements", "extract_implicit_requirements")
+
+    # --- implicit requirements extraction loop ---
+    graph.add_edge("extract_implicit_requirements", "validate_implicit_requirements")
+    graph.add_conditional_edges(
+        "validate_implicit_requirements",
+        route_implicit_requirements,
+        {
+            "ok": "deduplicate_requirements",
+            "retry": "correct_implicit_requirements",
+            "give_up": "finalize_implicit_requirements",
+        },
+    )
+    graph.add_edge("correct_implicit_requirements", "validate_implicit_requirements")
+    graph.add_edge("finalize_implicit_requirements", "deduplicate_requirements")
+    graph.add_edge("deduplicate_requirements", END)
 
     return graph.compile()
 
@@ -116,8 +153,8 @@ def run_extraction(
 
     Returns:
         The final GraphState dict, including extracted_data, job_requirements,
-        and any unresolved_concerns / requirements_warnings if max retries were
-        exhausted.
+        implicit_requirements, and any unresolved_concerns / requirements_warnings /
+        implicit_requirements_warnings if max retries were exhausted.
     """
     compiled = build_extraction_graph(llm=llm)
 
@@ -138,18 +175,28 @@ def run_extraction(
         "requirements_validation_result": None,
         "requirements_attempt_count": 0,
         "requirements_warnings": [],
+        # implicit requirements extraction
+        "implicit_requirements": None,
+        "implicit_requirements_validation_passed": False,
+        "implicit_requirements_validation_result": None,
+        "implicit_requirements_attempt_count": 0,
+        "implicit_requirements_warnings": [],
     }
 
     logger.debug("run_extraction: starting graph")
     result = compiled.invoke(initial_state)
     logger.debug(
         "run_extraction: finished — validation_passed=%s, attempts=%d, concerns=%d, "
-        "requirements_validation_passed=%s, req_attempts=%d, req_warnings=%d",
+        "requirements_validation_passed=%s, req_attempts=%d, req_warnings=%d, "
+        "implicit_requirements_validation_passed=%s, impl_attempts=%d, impl_warnings=%d",
         result.get("validation_passed"),
         result.get("attempt_count", 0),
         len(result.get("unresolved_concerns", [])),
         result.get("requirements_validation_passed"),
         result.get("requirements_attempt_count", 0),
         len(result.get("requirements_warnings", [])),
+        result.get("implicit_requirements_validation_passed"),
+        result.get("implicit_requirements_attempt_count", 0),
+        len(result.get("implicit_requirements_warnings", [])),
     )
     return result
