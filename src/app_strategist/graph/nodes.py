@@ -14,6 +14,8 @@ import json
 import logging
 from collections.abc import Callable
 
+from pydantic import ValidationError
+
 from app_strategist.llm.base import LLMProvider
 from app_strategist.utils import extract_json
 from app_strategist.graph.state import GraphState
@@ -31,12 +33,53 @@ from app_strategist.graph.prompts import (
     VALIDATE_REQUIREMENTS_USER_TEMPLATE,
     CORRECT_REQUIREMENTS_SYSTEM_PROMPT_TEMPLATE,
     CORRECT_REQUIREMENTS_USER_TEMPLATE,
+    EXTRACT_IMPLICIT_REQUIREMENTS_SYSTEM_PROMPT,
+    EXTRACT_IMPLICIT_REQUIREMENTS_USER_TEMPLATE,
+    VALIDATE_IMPLICIT_REQUIREMENTS_SYSTEM_PROMPT,
+    VALIDATE_IMPLICIT_REQUIREMENTS_USER_TEMPLATE,
+    CORRECT_IMPLICIT_REQUIREMENTS_SYSTEM_PROMPT_TEMPLATE,
+    CORRECT_IMPLICIT_REQUIREMENTS_USER_TEMPLATE,
+    DEDUPLICATE_REQUIREMENTS_SYSTEM_PROMPT,
+    DEDUPLICATE_REQUIREMENTS_USER_TEMPLATE,
 )
 
 logger = logging.getLogger(__name__)
 
+_VALID_PRIORITIES = frozenset(
+    {"minimum_requirement", "preferred_requirement", "nice_to_have", "ambiguous"}
+)
+
+
+def _validate_requirement(r: dict) -> dict | None:
+    """Validate a raw requirement dict through JobRequirement.
+
+    If the priority field holds an unrecognized value, coerces it to 'ambiguous'
+    and retries validation so that one bad LLM token cannot drop the entire item.
+    Returns None (with a warning) only when validation fails even after coercion.
+    """
+    try:
+        return JobRequirement.model_validate(r).model_dump()
+    except ValidationError:
+        raw_priority = r.get("priority", "")
+        if raw_priority not in _VALID_PRIORITIES:
+            logger.warning(
+                "requirement %r has unrecognized priority %r; coercing to 'ambiguous'",
+                r.get("label"),
+                raw_priority,
+            )
+            try:
+                return JobRequirement.model_validate(
+                    {**r, "priority": "ambiguous"}
+                ).model_dump()
+            except ValidationError:
+                pass
+        logger.warning("requirement %r is invalid after coercion; skipping", r.get("label"))
+        return None
+
+
 MAX_ATTEMPTS = 3
 MAX_REQUIREMENTS_ATTEMPTS = 3  # 1 initial extraction + 2 correction retries
+MAX_IMPLICIT_REQUIREMENTS_ATTEMPTS = 3  # 1 initial extraction + 2 correction retries
 
 
 # ---------------------------------------------------------------------------
@@ -227,8 +270,8 @@ def make_extract_requirements_node(llm: LLMProvider) -> Callable[[GraphState], d
         raw = extract_json(response)
         data = json.loads(raw)
         requirements = [
-            JobRequirement.model_validate(r).model_dump()
-            for r in data.get("requirements", [])
+            v for r in data.get("requirements", [])
+            if (v := _validate_requirement(r)) is not None
         ]
         return {
             "job_requirements": requirements,
@@ -332,8 +375,8 @@ def make_correct_requirements_node(llm: LLMProvider) -> Callable[[GraphState], d
         raw = extract_json(response)
         data = json.loads(raw)
         requirements = [
-            JobRequirement.model_validate(r).model_dump()
-            for r in data.get("requirements", [])
+            v for r in data.get("requirements", [])
+            if (v := _validate_requirement(r)) is not None
         ]
         return {
             "job_requirements": requirements,
@@ -389,6 +432,281 @@ def route_after_requirements_validation(state: GraphState) -> str:
     if state["requirements_attempt_count"] >= MAX_REQUIREMENTS_ATTEMPTS:
         return "give_up"
     return "retry"
+
+
+# ---------------------------------------------------------------------------
+# Internal helper
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Factory: extract_implicit_requirements node
+# ---------------------------------------------------------------------------
+
+def make_extract_implicit_requirements_node(llm: LLMProvider) -> Callable[[GraphState], dict]:
+    """Return a node that infers implicit requirements from the job description."""
+
+    def extract_implicit_requirements_node(state: GraphState) -> dict:
+        extracted = state.get("extracted_data") or {}
+        company_info = json.dumps(extracted.get("company_info", {}), indent=2)
+        job_info = json.dumps(extracted.get("job_info", {}), indent=2)
+        explicit_requirements = json.dumps(state.get("job_requirements") or [], indent=2)
+        user = EXTRACT_IMPLICIT_REQUIREMENTS_USER_TEMPLATE.format(
+            job_description=state["job_description"],
+            company_info=company_info,
+            job_info=job_info,
+            explicit_requirements=explicit_requirements,
+        )
+        logger.debug(
+            "extract_implicit_requirements_node: calling LLM (attempt %d)",
+            state["implicit_requirements_attempt_count"] + 1,
+        )
+        response = llm.complete(
+            EXTRACT_IMPLICIT_REQUIREMENTS_SYSTEM_PROMPT,
+            [{"role": "user", "content": user}],
+        )
+        raw = extract_json(response)
+        data = json.loads(raw)
+        requirements = []
+        for r in data.get("requirements", []):
+            validated = _validate_requirement(r)
+            if validated is None:
+                continue
+            if not validated.get("is_implicit"):
+                logger.warning(
+                    "extract_implicit_requirements_node: skipping item %r — "
+                    "is_implicit is False (LLM did not set it)",
+                    validated.get("label"),
+                )
+                continue
+            requirements.append(validated)
+        return {
+            "implicit_requirements": requirements,
+            "implicit_requirements_attempt_count": state["implicit_requirements_attempt_count"] + 1,
+        }
+
+    return extract_implicit_requirements_node
+
+
+# ---------------------------------------------------------------------------
+# Factory: validate_implicit_requirements node
+# ---------------------------------------------------------------------------
+
+def make_validate_implicit_requirements_node(llm: LLMProvider) -> Callable[[GraphState], dict]:
+    """Return a node that validates the inferred implicit requirements."""
+
+    def validate_implicit_requirements_node(state: GraphState) -> dict:
+        user = VALIDATE_IMPLICIT_REQUIREMENTS_USER_TEMPLATE.format(
+            job_description=state["job_description"],
+            requirements=json.dumps(state["implicit_requirements"], indent=2),
+        )
+        logger.debug(
+            "validate_implicit_requirements_node: validating %d requirement(s) (attempt %d)",
+            len(state["implicit_requirements"] or []),
+            state["implicit_requirements_attempt_count"],
+        )
+        response = llm.complete(
+            VALIDATE_IMPLICIT_REQUIREMENTS_SYSTEM_PROMPT,
+            [{"role": "user", "content": user}],
+        )
+        raw = extract_json(response)
+        validation_result = json.loads(raw)
+
+        issues: list[dict] = validation_result.get("issues", [])
+        passed = not bool(issues)
+        if passed:
+            logger.debug("validate_implicit_requirements_node: validation passed")
+        else:
+            types = [i.get("type") for i in issues]
+            logger.debug(
+                "validate_implicit_requirements_node: validation failed — issue types: %s", types
+            )
+
+        return {
+            "implicit_requirements_validation_passed": passed,
+            "implicit_requirements_validation_result": validation_result,
+        }
+
+    return validate_implicit_requirements_node
+
+
+# ---------------------------------------------------------------------------
+# Factory: correct_implicit_requirements node
+# ---------------------------------------------------------------------------
+
+def make_correct_implicit_requirements_node(llm: LLMProvider) -> Callable[[GraphState], dict]:
+    """Return a node that applies validator corrections to implicit requirements."""
+
+    def correct_implicit_requirements_node(state: GraphState) -> dict:
+        issues: list[dict] = (
+            state["implicit_requirements_validation_result"].get("issues", [])
+            if state["implicit_requirements_validation_result"]
+            else []
+        )
+
+        issue_lines = []
+        for item in issues:
+            issue_type = item.get("type", "unknown")
+            label = item.get("label") or "(new requirement)"
+            problem = item.get("problem", "")
+            correction = item.get("correction")  # may be None for "ungrounded"
+
+            if issue_type == "ungrounded":
+                issue_lines.append(
+                    f"- [ungrounded] '{label}': {problem}\n"
+                    f"  Action: REMOVE this requirement entirely (no replacement)"
+                )
+            elif issue_type == "duplicate":
+                duplicate_of = item.get("duplicate_of") or ""
+                correction_label = correction.get("label", "") if correction else ""
+                correction_desc = correction.get("description", "") if correction else ""
+                correction_priority = correction.get("priority", "") if correction else ""
+                issue_lines.append(
+                    f"- [duplicate] '{label}' and '{duplicate_of}': {problem}\n"
+                    f"  Merged correction: label={correction_label!r}, "
+                    f"description={correction_desc!r}, priority={correction_priority!r}"
+                )
+            else:
+                correction_label = correction.get("label", "") if correction else ""
+                correction_desc = correction.get("description", "") if correction else ""
+                correction_priority = correction.get("priority", "") if correction else ""
+                issue_lines.append(
+                    f"- [{issue_type}] '{label}': {problem}\n"
+                    f"  Correction: label={correction_label!r}, "
+                    f"description={correction_desc!r}, priority={correction_priority!r}"
+                )
+        issues_str = "\n".join(issue_lines) if issue_lines else "(no issues provided)"
+
+        system = CORRECT_IMPLICIT_REQUIREMENTS_SYSTEM_PROMPT_TEMPLATE.format(issues=issues_str)
+        user = CORRECT_IMPLICIT_REQUIREMENTS_USER_TEMPLATE.format(
+            job_description=state["job_description"],
+            requirements=json.dumps(state["implicit_requirements"], indent=2),
+        )
+
+        logger.debug(
+            "correct_implicit_requirements_node: applying %d correction(s) (attempt %d → %d)",
+            len(issues),
+            state["implicit_requirements_attempt_count"],
+            state["implicit_requirements_attempt_count"] + 1,
+        )
+        response = llm.complete(system, [{"role": "user", "content": user}])
+        raw = extract_json(response)
+        data = json.loads(raw)
+        requirements = []
+        for r in data.get("requirements", []):
+            validated = _validate_requirement(r)
+            if validated is None:
+                continue
+            if not validated.get("is_implicit"):
+                logger.warning(
+                    "correct_implicit_requirements_node: skipping item %r — is_implicit is False",
+                    validated.get("label"),
+                )
+                continue
+            requirements.append(validated)
+        return {
+            "implicit_requirements": requirements,
+            "implicit_requirements_attempt_count": state["implicit_requirements_attempt_count"] + 1,
+        }
+
+    return correct_implicit_requirements_node
+
+
+# ---------------------------------------------------------------------------
+# Plain node: finalize_implicit_requirements (no LLM)
+# ---------------------------------------------------------------------------
+
+def finalize_implicit_requirements_node(state: GraphState) -> dict:
+    """Add a warning when implicit requirements validation exhausts max retries."""
+    warnings: list[str] = []
+    validation_result = state.get("implicit_requirements_validation_result")
+    if validation_result and not state.get("implicit_requirements_validation_passed"):
+        issues = validation_result.get("issues", [])
+        if issues:
+            issue_summary = "; ".join(
+                f"{i.get('type', 'unknown')} — {i.get('label') or 'new'}: {i.get('problem', '')}"
+                for i in issues
+            )
+            n = state.get("implicit_requirements_attempt_count", 0)
+            warnings.append(
+                f"Implicit requirements validation did not fully pass after {n} attempt(s). "
+                f"Outstanding issues: {issue_summary}"
+            )
+    logger.debug("finalize_implicit_requirements_node: %d warning(s)", len(warnings))
+    return {"implicit_requirements_warnings": warnings}
+
+
+# ---------------------------------------------------------------------------
+# Conditional edge: route after implicit requirements validation
+# ---------------------------------------------------------------------------
+
+def route_implicit_requirements(state: GraphState) -> str:
+    """Decide the next step after the validate_implicit_requirements node.
+
+    Returns:
+        "ok"       — validation passed, proceed to END
+        "retry"    — validation failed, attempts remain, loop back to correct
+        "give_up"  — validation failed, max attempts reached, proceed to finalize
+    """
+    if state["implicit_requirements_validation_passed"]:
+        return "ok"
+    if state["implicit_requirements_attempt_count"] >= MAX_IMPLICIT_REQUIREMENTS_ATTEMPTS:
+        return "give_up"
+    return "retry"
+
+
+# ---------------------------------------------------------------------------
+# Factory: deduplicate_requirements node
+# ---------------------------------------------------------------------------
+
+def make_deduplicate_requirements_node(llm: LLMProvider) -> Callable[[GraphState], dict]:
+    """Return a node that drops implicit requirements that substantially overlap with explicit ones."""
+
+    def deduplicate_requirements_node(state: GraphState) -> dict:
+        explicit = state.get("job_requirements") or []
+        implicit = state.get("implicit_requirements") or []
+
+        if not explicit or not implicit:
+            return {}
+
+        explicit_text = "\n".join(
+            f"- {r['label']}: {r['description']}" for r in explicit
+        )
+        implicit_text = "\n".join(
+            f"- {r['label']}: {r['description']}" for r in implicit
+        )
+        user = DEDUPLICATE_REQUIREMENTS_USER_TEMPLATE.format(
+            explicit_requirements=explicit_text,
+            implicit_requirements=implicit_text,
+        )
+        logger.debug(
+            "deduplicate_requirements_node: comparing %d explicit vs %d implicit requirement(s)",
+            len(explicit),
+            len(implicit),
+        )
+        response = llm.complete(
+            DEDUPLICATE_REQUIREMENTS_SYSTEM_PROMPT,
+            [{"role": "user", "content": user}],
+        )
+        try:
+            data = json.loads(extract_json(response))
+            remove_labels = set(data.get("remove", []))
+        except Exception:
+            logger.warning(
+                "deduplicate_requirements_node: failed to parse LLM response; "
+                "keeping all implicit requirements"
+            )
+            return {}
+
+        if remove_labels:
+            logger.debug(
+                "deduplicate_requirements_node: removing %d implicit requirement(s): %s",
+                len(remove_labels),
+                remove_labels,
+            )
+        filtered = [r for r in implicit if r["label"] not in remove_labels]
+        return {"implicit_requirements": filtered}
+
+    return deduplicate_requirements_node
 
 
 # ---------------------------------------------------------------------------

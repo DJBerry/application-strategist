@@ -48,6 +48,15 @@ SAMPLE_REQUIREMENTS = [
     },
 ]
 
+SAMPLE_IMPLICIT_REQUIREMENTS = [
+    {
+        "label": "Version control familiarity",
+        "description": "The JD mentions a collaborative engineering team, implying shared version control usage.",
+        "priority": "preferred_requirement",
+        "is_implicit": True,
+    },
+]
+
 CHECK_PASS = json.dumps({"all_correct": True, "incorrect_fields": [], "ambiguous_fields": []})
 CHECK_FAIL_NAME = json.dumps({
     "all_correct": False,
@@ -64,6 +73,10 @@ CORRECTED_NAME = json.dumps({"company_info": {"company_name": "Acme Corporation"
 
 REQ_EXTRACT_PASS = json.dumps({"requirements": SAMPLE_REQUIREMENTS})
 REQ_VALIDATE_PASS = json.dumps({"all_correct": True, "issues": []})
+
+IMPLICIT_REQ_EXTRACT_PASS = json.dumps({"requirements": SAMPLE_IMPLICIT_REQUIREMENTS})
+IMPLICIT_REQ_VALIDATE_PASS = json.dumps({"all_correct": True, "issues": []})
+DEDUP_PASS = json.dumps({"remove": []})
 
 
 class MockLLMSequence:
@@ -105,6 +118,11 @@ def _full_initial_state() -> dict:
         "requirements_validation_result": None,
         "requirements_attempt_count": 0,
         "requirements_warnings": [],
+        "implicit_requirements": None,
+        "implicit_requirements_validation_passed": False,
+        "implicit_requirements_validation_result": None,
+        "implicit_requirements_attempt_count": 0,
+        "implicit_requirements_warnings": [],
     }
 
 
@@ -120,12 +138,15 @@ def _extracted_with_wrong_name() -> dict:
 # ---------------------------------------------------------------------------
 
 def test_success_on_first_try():
-    """Graph completes: extract → check(pass) → extract_requirements → validate(pass) → END."""
+    """Graph completes: extract → check(pass) → extract_requirements → validate(pass) → implicit → dedup → END."""
     llm = MockLLMSequence([
         json.dumps(SAMPLE_EXTRACTED),  # extract
         CHECK_PASS,                    # check → ok
         REQ_EXTRACT_PASS,              # extract_requirements
-        REQ_VALIDATE_PASS,             # validate_requirements → ok
+        REQ_VALIDATE_PASS,             # validate_requirements → ok → implicit
+        IMPLICIT_REQ_EXTRACT_PASS,     # extract_implicit_requirements
+        IMPLICIT_REQ_VALIDATE_PASS,    # validate_implicit_requirements → ok → dedup
+        DEDUP_PASS,                    # deduplicate_requirements → END
     ])
     graph = build_extraction_graph(llm=llm)
 
@@ -138,19 +159,24 @@ def test_success_on_first_try():
     assert result["requirements_validation_passed"] is True
     assert len(result["job_requirements"]) == 2
     assert result["requirements_warnings"] == []
-    assert llm.call_count == 4
+    assert result["implicit_requirements_validation_passed"] is True
+    assert result["implicit_requirements_warnings"] == []
+    assert llm.call_count == 7
 
 
 def test_retry_then_success():
-    """Metadata retry: extract → check(fail) → retry → check(pass) → req nodes → END."""
+    """Metadata retry: extract → check(fail) → retry → check(pass) → req nodes → implicit → dedup → END."""
     wrong_extraction = json.dumps(_extracted_with_wrong_name())
     llm = MockLLMSequence([
-        wrong_extraction,   # extract
-        CHECK_FAIL_NAME,    # check → fail
-        CORRECTED_NAME,     # retry
-        CHECK_PASS,         # check → pass
-        REQ_EXTRACT_PASS,   # extract_requirements
-        REQ_VALIDATE_PASS,  # validate_requirements → ok
+        wrong_extraction,          # extract
+        CHECK_FAIL_NAME,           # check → fail
+        CORRECTED_NAME,            # retry
+        CHECK_PASS,                # check → pass
+        REQ_EXTRACT_PASS,          # extract_requirements
+        REQ_VALIDATE_PASS,         # validate_requirements → ok → implicit
+        IMPLICIT_REQ_EXTRACT_PASS, # extract_implicit_requirements
+        IMPLICIT_REQ_VALIDATE_PASS,# validate_implicit_requirements → ok → dedup
+        DEDUP_PASS,                # deduplicate_requirements → END
     ])
     graph = build_extraction_graph(llm=llm)
 
@@ -161,22 +187,26 @@ def test_retry_then_success():
     assert result["unresolved_concerns"] == []
     assert result["attempt_count"] == 2
     assert result["requirements_validation_passed"] is True
-    assert llm.call_count == 6
+    assert result["implicit_requirements_validation_passed"] is True
+    assert llm.call_count == 9
 
 
 def test_max_retries_exceeded():
-    """All 3 metadata attempts fail → finalize → extract_requirements runs anyway."""
+    """All 3 metadata attempts fail → finalize → extract_requirements runs anyway → implicit → dedup → END."""
     wrong = json.dumps(_extracted_with_wrong_name())
     partial_still_wrong = json.dumps({"company_info": {"company_name": "Acme Corp"}})
     llm = MockLLMSequence([
-        wrong,               # extract (attempt 1)
-        CHECK_FAIL_NAME,     # check → fail
-        partial_still_wrong, # retry (attempt 2)
-        CHECK_FAIL_NAME,     # check → fail
-        partial_still_wrong, # retry (attempt 3)
-        CHECK_FAIL_NAME,     # check → fail → give_up → finalize
-        REQ_EXTRACT_PASS,    # extract_requirements
-        REQ_VALIDATE_PASS,   # validate_requirements → ok
+        wrong,                     # extract (attempt 1)
+        CHECK_FAIL_NAME,           # check → fail
+        partial_still_wrong,       # retry (attempt 2)
+        CHECK_FAIL_NAME,           # check → fail
+        partial_still_wrong,       # retry (attempt 3)
+        CHECK_FAIL_NAME,           # check → fail → give_up → finalize
+        REQ_EXTRACT_PASS,          # extract_requirements
+        REQ_VALIDATE_PASS,         # validate_requirements → ok → implicit
+        IMPLICIT_REQ_EXTRACT_PASS, # extract_implicit_requirements
+        IMPLICIT_REQ_VALIDATE_PASS,# validate_implicit_requirements → ok → dedup
+        DEDUP_PASS,                # deduplicate_requirements → END
     ])
     graph = build_extraction_graph(llm=llm)
 
@@ -189,7 +219,8 @@ def test_max_retries_exceeded():
     # Requirements extraction still ran
     assert result["requirements_validation_passed"] is True
     assert len(result["job_requirements"]) == 2
-    assert llm.call_count == 8
+    assert result["implicit_requirements_validation_passed"] is True
+    assert llm.call_count == 11
 
 
 def test_run_extraction_returns_full_state():
@@ -199,6 +230,9 @@ def test_run_extraction_returns_full_state():
         CHECK_PASS,
         REQ_EXTRACT_PASS,
         REQ_VALIDATE_PASS,
+        IMPLICIT_REQ_EXTRACT_PASS,
+        IMPLICIT_REQ_VALIDATE_PASS,
+        DEDUP_PASS,
     ])
 
     result = run_extraction(
@@ -215,6 +249,9 @@ def test_run_extraction_returns_full_state():
         "job_requirements", "requirements_validation_passed",
         "requirements_validation_result", "requirements_attempt_count",
         "requirements_warnings",
+        "implicit_requirements", "implicit_requirements_validation_passed",
+        "implicit_requirements_validation_result", "implicit_requirements_attempt_count",
+        "implicit_requirements_warnings",
     }
     assert expected_keys.issubset(result.keys())
     assert result["job_description"] == SAMPLE_JD
@@ -229,6 +266,9 @@ def test_run_extraction_with_cover_letter():
         CHECK_PASS,
         REQ_EXTRACT_PASS,
         REQ_VALIDATE_PASS,
+        IMPLICIT_REQ_EXTRACT_PASS,
+        IMPLICIT_REQ_VALIDATE_PASS,
+        DEDUP_PASS,
     ])
 
     result = run_extraction(
@@ -248,6 +288,9 @@ def test_extracted_data_has_required_structure():
         CHECK_PASS,
         REQ_EXTRACT_PASS,
         REQ_VALIDATE_PASS,
+        IMPLICIT_REQ_EXTRACT_PASS,
+        IMPLICIT_REQ_VALIDATE_PASS,
+        DEDUP_PASS,
     ])
 
     result = run_extraction(job_description=SAMPLE_JD, llm=llm)
@@ -277,6 +320,9 @@ def test_ambiguous_field_does_not_cause_retry():
         check_with_ambiguous,
         REQ_EXTRACT_PASS,
         REQ_VALIDATE_PASS,
+        IMPLICIT_REQ_EXTRACT_PASS,
+        IMPLICIT_REQ_VALIDATE_PASS,
+        DEDUP_PASS,
     ])
 
     result = run_extraction(job_description=SAMPLE_JD, llm=llm)
@@ -285,11 +331,11 @@ def test_ambiguous_field_does_not_cause_retry():
     assert result["unresolved_concerns"] == []
     assert len(result["field_caveats"]) == 1
     assert result["field_caveats"][0]["field"] == "job_info.work_environment"
-    assert llm.call_count == 4
+    assert llm.call_count == 7
 
 
 def test_requirements_retry_then_success():
-    """Requirements validation fails once → correct → validate passes → END."""
+    """Requirements validation fails once → correct → validate passes → implicit → END."""
     req_validate_fail = json.dumps({
         "all_correct": False,
         "issues": [
@@ -327,7 +373,10 @@ def test_requirements_retry_then_success():
         REQ_EXTRACT_PASS,              # extract_requirements
         req_validate_fail,             # validate_requirements → retry
         corrected_reqs,                # correct_requirements
-        REQ_VALIDATE_PASS,             # validate_requirements → ok
+        REQ_VALIDATE_PASS,             # validate_requirements → ok → implicit
+        IMPLICIT_REQ_EXTRACT_PASS,     # extract_implicit_requirements
+        IMPLICIT_REQ_VALIDATE_PASS,    # validate_implicit_requirements → ok → dedup
+        DEDUP_PASS,                    # deduplicate_requirements → END
     ])
     graph = build_extraction_graph(llm=llm)
 
@@ -338,11 +387,12 @@ def test_requirements_retry_then_success():
     assert result["requirements_attempt_count"] == 2
     python_req = next(r for r in result["job_requirements"] if r["label"] == "Python proficiency")
     assert python_req["description"] == "Experience with Python in a production environment"
-    assert llm.call_count == 6
+    assert result["implicit_requirements_validation_passed"] is True
+    assert llm.call_count == 9
 
 
 def test_requirements_max_retries_exceeded():
-    """Requirements validation fails all 3 attempts → finalize_requirements → warnings."""
+    """Requirements validation fails all 3 attempts → finalize_requirements → implicit → END."""
     req_validate_fail = json.dumps({
         "all_correct": False,
         "issues": [
@@ -369,7 +419,10 @@ def test_requirements_max_retries_exceeded():
         still_wrong,                   # correct (attempt 2)
         req_validate_fail,             # validate → retry
         still_wrong,                   # correct (attempt 3)
-        req_validate_fail,             # validate → give_up → finalize_requirements
+        req_validate_fail,             # validate → give_up → finalize_requirements → implicit
+        IMPLICIT_REQ_EXTRACT_PASS,     # extract_implicit_requirements
+        IMPLICIT_REQ_VALIDATE_PASS,    # validate_implicit_requirements → ok → dedup
+        DEDUP_PASS,                    # deduplicate_requirements → END
     ])
     graph = build_extraction_graph(llm=llm)
 
@@ -379,4 +432,173 @@ def test_requirements_max_retries_exceeded():
     assert result["requirements_attempt_count"] == 3
     assert len(result["requirements_warnings"]) == 1
     assert "did not fully pass" in result["requirements_warnings"][0]
-    assert llm.call_count == 8
+    # Implicit extraction still ran after finalize_requirements
+    assert result["implicit_requirements_validation_passed"] is True
+    assert llm.call_count == 11
+
+
+# ---------------------------------------------------------------------------
+# Implicit requirements integration tests
+# ---------------------------------------------------------------------------
+
+def test_implicit_requirements_success_on_first_try():
+    """Implicit extraction and validation succeed on first attempt → dedup → END."""
+    llm = MockLLMSequence([
+        json.dumps(SAMPLE_EXTRACTED),  # extract
+        CHECK_PASS,                    # check → ok
+        REQ_EXTRACT_PASS,              # extract_requirements
+        REQ_VALIDATE_PASS,             # validate_requirements → ok → implicit
+        IMPLICIT_REQ_EXTRACT_PASS,     # extract_implicit_requirements
+        IMPLICIT_REQ_VALIDATE_PASS,    # validate_implicit_requirements → ok → dedup
+        DEDUP_PASS,                    # deduplicate_requirements → END
+    ])
+    graph = build_extraction_graph(llm=llm)
+
+    result = graph.invoke(_full_initial_state())
+
+    assert result["implicit_requirements_validation_passed"] is True
+    assert len(result["implicit_requirements"]) == 1
+    assert result["implicit_requirements"][0]["is_implicit"] is True
+    assert result["implicit_requirements"][0]["label"] == "Version control familiarity"
+    assert result["implicit_requirements_warnings"] == []
+    assert result["implicit_requirements_attempt_count"] == 1
+    assert llm.call_count == 7
+
+
+def test_implicit_requirements_retry_then_success():
+    """Implicit validation fails once → correct → validate passes → END."""
+    implicit_validate_fail = json.dumps({
+        "all_correct": False,
+        "issues": [
+            {
+                "type": "ungrounded",
+                "label": "Communication skills",
+                "duplicate_of": None,
+                "problem": "Generic; no specific JD text implies this",
+                "correction": None,
+            }
+        ],
+    })
+    corrected_implicit = json.dumps({
+        "requirements": [
+            {
+                "label": "Version control familiarity",
+                "description": "Implied by collaborative engineering team context in JD",
+                "priority": "preferred_requirement",
+                "is_implicit": True,
+            }
+        ]
+    })
+
+    llm = MockLLMSequence([
+        json.dumps(SAMPLE_EXTRACTED),  # extract
+        CHECK_PASS,                    # check → ok
+        REQ_EXTRACT_PASS,              # extract_requirements
+        REQ_VALIDATE_PASS,             # validate_requirements → ok → implicit
+        IMPLICIT_REQ_EXTRACT_PASS,     # extract_implicit_requirements (attempt 1)
+        implicit_validate_fail,        # validate_implicit → retry
+        corrected_implicit,            # correct_implicit_requirements (attempt 2)
+        IMPLICIT_REQ_VALIDATE_PASS,    # validate_implicit → ok → dedup
+        DEDUP_PASS,                    # deduplicate_requirements → END
+    ])
+    graph = build_extraction_graph(llm=llm)
+
+    result = graph.invoke(_full_initial_state())
+
+    assert result["implicit_requirements_validation_passed"] is True
+    assert result["implicit_requirements_warnings"] == []
+    assert result["implicit_requirements_attempt_count"] == 2
+    assert result["implicit_requirements"][0]["label"] == "Version control familiarity"
+    assert llm.call_count == 9
+
+
+def test_implicit_requirements_max_retries_exceeded():
+    """Implicit validation fails all 3 attempts → finalize_implicit_requirements → END."""
+    implicit_validate_fail = json.dumps({
+        "all_correct": False,
+        "issues": [
+            {
+                "type": "ungrounded",
+                "label": "Communication skills",
+                "duplicate_of": None,
+                "problem": "No JD evidence",
+                "correction": None,
+            }
+        ],
+    })
+    still_has_ungrounded = json.dumps({
+        "requirements": [
+            {
+                "label": "Communication skills",
+                "description": "Generic soft skill without JD evidence",
+                "priority": "preferred_requirement",
+                "is_implicit": True,
+            }
+        ]
+    })
+
+    llm = MockLLMSequence([
+        json.dumps(SAMPLE_EXTRACTED),  # extract
+        CHECK_PASS,                    # check → ok
+        REQ_EXTRACT_PASS,              # extract_requirements
+        REQ_VALIDATE_PASS,             # validate_requirements → ok → implicit
+        IMPLICIT_REQ_EXTRACT_PASS,     # extract_implicit_requirements (attempt 1)
+        implicit_validate_fail,        # validate_implicit → retry
+        still_has_ungrounded,          # correct_implicit (attempt 2)
+        implicit_validate_fail,        # validate_implicit → retry
+        still_has_ungrounded,          # correct_implicit (attempt 3)
+        implicit_validate_fail,        # validate_implicit → give_up → finalize_implicit → dedup
+        DEDUP_PASS,                    # deduplicate_requirements → END
+    ])
+    graph = build_extraction_graph(llm=llm)
+
+    result = graph.invoke(_full_initial_state())
+
+    assert result["implicit_requirements_validation_passed"] is False
+    assert result["implicit_requirements_attempt_count"] == 3
+    assert len(result["implicit_requirements_warnings"]) == 1
+    assert "did not fully pass" in result["implicit_requirements_warnings"][0]
+    assert llm.call_count == 11
+
+
+# ---------------------------------------------------------------------------
+# Deduplication integration tests
+# ---------------------------------------------------------------------------
+
+def test_dedup_removes_overlapping_implicit_from_final_state():
+    """dedup node drops implicit requirements that overlap with explicit ones."""
+    dedup_removes = json.dumps({"remove": ["Version control familiarity"]})
+    llm = MockLLMSequence([
+        json.dumps(SAMPLE_EXTRACTED),  # extract
+        CHECK_PASS,                    # check → ok
+        REQ_EXTRACT_PASS,              # extract_requirements
+        REQ_VALIDATE_PASS,             # validate_requirements → ok → implicit
+        IMPLICIT_REQ_EXTRACT_PASS,     # extract_implicit_requirements
+        IMPLICIT_REQ_VALIDATE_PASS,    # validate_implicit_requirements → ok → dedup
+        dedup_removes,                 # deduplicate_requirements → END
+    ])
+    graph = build_extraction_graph(llm=llm)
+
+    result = graph.invoke(_full_initial_state())
+
+    assert result["implicit_requirements"] == []
+    assert llm.call_count == 7
+
+
+def test_dedup_keeps_all_implicit_when_no_overlap():
+    """dedup node with empty remove list leaves implicit requirements unchanged."""
+    llm = MockLLMSequence([
+        json.dumps(SAMPLE_EXTRACTED),  # extract
+        CHECK_PASS,                    # check → ok
+        REQ_EXTRACT_PASS,              # extract_requirements
+        REQ_VALIDATE_PASS,             # validate_requirements → ok → implicit
+        IMPLICIT_REQ_EXTRACT_PASS,     # extract_implicit_requirements
+        IMPLICIT_REQ_VALIDATE_PASS,    # validate_implicit_requirements → ok → dedup
+        DEDUP_PASS,                    # deduplicate_requirements → END
+    ])
+    graph = build_extraction_graph(llm=llm)
+
+    result = graph.invoke(_full_initial_state())
+
+    assert len(result["implicit_requirements"]) == 1
+    assert result["implicit_requirements"][0]["label"] == "Version control familiarity"

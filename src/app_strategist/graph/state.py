@@ -84,3 +84,30 @@ class GraphState(TypedDict):
     # Retry tracking for requirements extraction (independent of extraction attempt_count)
     requirements_attempt_count: int
     requirements_warnings: list[str]  # populated by finalize_requirements_node on exhaustion
+
+    # Implicit requirements inferred from JD evidence (not directly stated)
+    # Schema: [{"label": str, "description": str, "priority": str, "is_implicit": true}, ...]
+    # priority is one of: "minimum_requirement", "preferred_requirement", "nice_to_have"
+    # ("ambiguous" is disallowed — if priority cannot be determined, use "preferred_requirement")
+    implicit_requirements: list[dict] | None
+
+    # Validation output for implicit requirements extraction
+    implicit_requirements_validation_passed: bool
+    # Schema mirrors requirements_validation_result but adds "ungrounded" issue type:
+    #   {
+    #     "all_correct": bool,
+    #     "issues": [
+    #       {
+    #         "type": "missing" | "inaccurate" | "wrong_priority" | "duplicate" | "ungrounded",
+    #         "label": str | None,
+    #         "duplicate_of": str | None,
+    #         "problem": str,
+    #         "correction": {"label": str, ...} | null   # null for ungrounded (removal)
+    #       }
+    #     ]
+    #   }
+    implicit_requirements_validation_result: dict | None
+
+    # Retry tracking for implicit requirements extraction
+    implicit_requirements_attempt_count: int
+    implicit_requirements_warnings: list[str]  # populated by finalize_implicit_requirements_node

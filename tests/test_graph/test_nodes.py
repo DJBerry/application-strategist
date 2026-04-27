@@ -12,14 +12,20 @@ from app_strategist.graph.nodes import (
     _deep_merge,
     finalize_node,
     finalize_requirements_node,
+    finalize_implicit_requirements_node,
     make_check_node,
     make_correct_requirements_node,
+    make_correct_implicit_requirements_node,
+    make_deduplicate_requirements_node,
     make_extract_node,
     make_extract_requirements_node,
+    make_extract_implicit_requirements_node,
     make_retry_node,
     make_validate_requirements_node,
+    make_validate_implicit_requirements_node,
     route_after_check,
     route_after_requirements_validation,
+    route_implicit_requirements,
 )
 
 
@@ -79,6 +85,11 @@ def _base_state(**overrides) -> dict:
         "requirements_validation_result": None,
         "requirements_attempt_count": 0,
         "requirements_warnings": [],
+        "implicit_requirements": None,
+        "implicit_requirements_validation_passed": False,
+        "implicit_requirements_validation_result": None,
+        "implicit_requirements_attempt_count": 0,
+        "implicit_requirements_warnings": [],
     }
     state.update(overrides)
     return state
@@ -710,3 +721,364 @@ def test_req_route_ok_takes_priority_over_attempts():
     """validation_passed=True always wins regardless of attempt count."""
     state = _base_state(requirements_validation_passed=True, requirements_attempt_count=4)
     assert route_after_requirements_validation(state) == "ok"
+
+
+# ---------------------------------------------------------------------------
+# Implicit requirements test fixtures
+# ---------------------------------------------------------------------------
+
+SAMPLE_IMPLICIT_REQUIREMENTS = [
+    {
+        "label": "Version control familiarity",
+        "description": "The JD lists multiple engineers collaborating on a shared codebase, implying git or similar VCS is expected.",
+        "priority": "preferred_requirement",
+        "is_implicit": True,
+    },
+]
+
+SAMPLE_IMPLICIT_REQUIREMENTS_JSON = json.dumps({"requirements": SAMPLE_IMPLICIT_REQUIREMENTS})
+IMPLICIT_REQ_VALIDATE_PASS = json.dumps({"all_correct": True, "issues": []})
+
+
+# ---------------------------------------------------------------------------
+# make_extract_implicit_requirements_node tests
+# ---------------------------------------------------------------------------
+
+def test_extract_implicit_requirements_node():
+    llm = MockLLM([SAMPLE_IMPLICIT_REQUIREMENTS_JSON])
+    node = make_extract_implicit_requirements_node(llm)
+
+    state = _base_state(
+        extracted_data=SAMPLE_EXTRACTED,
+        job_requirements=SAMPLE_REQUIREMENTS,
+    )
+    result = node(state)
+
+    assert len(result["implicit_requirements"]) == 1
+    assert result["implicit_requirements"][0]["label"] == "Version control familiarity"
+    assert result["implicit_requirements"][0]["is_implicit"] is True
+    assert result["implicit_requirements_attempt_count"] == 1
+
+
+def test_extract_implicit_requirements_node_skips_non_implicit(caplog):
+    """Items returned with is_implicit=False are skipped with a warning."""
+    non_implicit_item = {
+        "label": "Python proficiency",
+        "description": "Should have been in explicit list",
+        "priority": "minimum_requirement",
+        "is_implicit": False,
+    }
+    llm = MockLLM([json.dumps({"requirements": [non_implicit_item]})])
+    node = make_extract_implicit_requirements_node(llm)
+
+    import logging
+    with caplog.at_level(logging.WARNING):
+        result = node(_base_state(extracted_data=SAMPLE_EXTRACTED, job_requirements=[]))
+
+    assert result["implicit_requirements"] == []
+    assert any("is_implicit is False" in r.message for r in caplog.records)
+
+
+def test_extract_implicit_requirements_node_increments_attempt_count():
+    llm = MockLLM([SAMPLE_IMPLICIT_REQUIREMENTS_JSON])
+    node = make_extract_implicit_requirements_node(llm)
+
+    result = node(_base_state(
+        extracted_data=SAMPLE_EXTRACTED,
+        job_requirements=[],
+        implicit_requirements_attempt_count=1,
+    ))
+
+    assert result["implicit_requirements_attempt_count"] == 2
+
+
+def test_extract_implicit_requirements_node_handles_missing_extracted_data():
+    """extracted_data=None falls back to empty context — node should not crash."""
+    llm = MockLLM([SAMPLE_IMPLICIT_REQUIREMENTS_JSON])
+    node = make_extract_implicit_requirements_node(llm)
+
+    result = node(_base_state(extracted_data=None, job_requirements=[]))
+
+    assert isinstance(result["implicit_requirements"], list)
+
+
+# ---------------------------------------------------------------------------
+# make_validate_implicit_requirements_node tests
+# ---------------------------------------------------------------------------
+
+def test_validate_implicit_requirements_node_clean():
+    llm = MockLLM([IMPLICIT_REQ_VALIDATE_PASS])
+    node = make_validate_implicit_requirements_node(llm)
+
+    state = _base_state(
+        implicit_requirements=SAMPLE_IMPLICIT_REQUIREMENTS,
+        implicit_requirements_attempt_count=1,
+    )
+    result = node(state)
+
+    assert result["implicit_requirements_validation_passed"] is True
+    assert result["implicit_requirements_validation_result"]["all_correct"] is True
+    assert result["implicit_requirements_validation_result"]["issues"] == []
+
+
+def test_validate_implicit_requirements_node_with_issues():
+    issues = [
+        {
+            "type": "ungrounded",
+            "label": "Communication skills",
+            "duplicate_of": None,
+            "problem": "Generic; no specific JD text implies this",
+            "correction": None,
+        }
+    ]
+    llm = MockLLM([json.dumps({"all_correct": False, "issues": issues})])
+    node = make_validate_implicit_requirements_node(llm)
+
+    state = _base_state(
+        implicit_requirements=SAMPLE_IMPLICIT_REQUIREMENTS,
+        implicit_requirements_attempt_count=1,
+    )
+    result = node(state)
+
+    assert result["implicit_requirements_validation_passed"] is False
+    assert len(result["implicit_requirements_validation_result"]["issues"]) == 1
+    assert result["implicit_requirements_validation_result"]["issues"][0]["type"] == "ungrounded"
+
+
+# ---------------------------------------------------------------------------
+# make_correct_implicit_requirements_node tests
+# ---------------------------------------------------------------------------
+
+def test_correct_implicit_requirements_node_removes_ungrounded():
+    """An ungrounded item named in the issues is removed; the valid one remains."""
+    two_implicit = [
+        {
+            "label": "Version control familiarity",
+            "description": "Implied by collaborative codebase context",
+            "priority": "preferred_requirement",
+            "is_implicit": True,
+        },
+        {
+            "label": "Communication skills",
+            "description": "Generic soft skill",
+            "priority": "preferred_requirement",
+            "is_implicit": True,
+        },
+    ]
+    corrected = json.dumps({
+        "requirements": [
+            {
+                "label": "Version control familiarity",
+                "description": "Implied by collaborative codebase context",
+                "priority": "preferred_requirement",
+                "is_implicit": True,
+            }
+        ]
+    })
+    issues = [
+        {
+            "type": "ungrounded",
+            "label": "Communication skills",
+            "duplicate_of": None,
+            "problem": "No JD evidence",
+            "correction": None,
+        }
+    ]
+    llm = MockLLM([corrected])
+    node = make_correct_implicit_requirements_node(llm)
+
+    state = _base_state(
+        implicit_requirements=two_implicit,
+        implicit_requirements_attempt_count=1,
+        implicit_requirements_validation_result={"all_correct": False, "issues": issues},
+    )
+    result = node(state)
+
+    assert len(result["implicit_requirements"]) == 1
+    assert result["implicit_requirements"][0]["label"] == "Version control familiarity"
+    assert result["implicit_requirements_attempt_count"] == 2
+
+
+def test_correct_implicit_requirements_node_increments_attempt_count():
+    corrected = json.dumps({"requirements": SAMPLE_IMPLICIT_REQUIREMENTS})
+    llm = MockLLM([corrected])
+    node = make_correct_implicit_requirements_node(llm)
+
+    state = _base_state(
+        implicit_requirements=SAMPLE_IMPLICIT_REQUIREMENTS,
+        implicit_requirements_attempt_count=2,
+        implicit_requirements_validation_result={"all_correct": False, "issues": [
+            {"type": "wrong_priority", "label": "Version control familiarity",
+             "duplicate_of": None, "problem": "Should be minimum",
+             "correction": {"label": "Version control familiarity",
+                            "description": "...", "priority": "minimum_requirement",
+                            "is_implicit": True}}
+        ]},
+    )
+    result = node(state)
+    assert result["implicit_requirements_attempt_count"] == 3
+
+
+# ---------------------------------------------------------------------------
+# finalize_implicit_requirements_node tests
+# ---------------------------------------------------------------------------
+
+def test_finalize_implicit_requirements_node():
+    issues = [
+        {
+            "type": "ungrounded",
+            "label": "Communication skills",
+            "problem": "Not evidenced in JD",
+            "correction": None,
+        }
+    ]
+    state = _base_state(
+        implicit_requirements_validation_passed=False,
+        implicit_requirements_attempt_count=3,
+        implicit_requirements_validation_result={"all_correct": False, "issues": issues},
+    )
+    result = finalize_implicit_requirements_node(state)
+
+    assert len(result["implicit_requirements_warnings"]) == 1
+    assert "did not fully pass" in result["implicit_requirements_warnings"][0]
+    assert "ungrounded" in result["implicit_requirements_warnings"][0]
+
+
+def test_finalize_implicit_requirements_node_empty_when_no_issues():
+    state = _base_state(
+        implicit_requirements_validation_passed=False,
+        implicit_requirements_validation_result={"all_correct": False, "issues": []},
+    )
+    result = finalize_implicit_requirements_node(state)
+    assert result["implicit_requirements_warnings"] == []
+
+
+def test_finalize_implicit_requirements_node_empty_when_no_validation_result():
+    state = _base_state(
+        implicit_requirements_validation_passed=False,
+        implicit_requirements_validation_result=None,
+    )
+    result = finalize_implicit_requirements_node(state)
+    assert result["implicit_requirements_warnings"] == []
+
+
+# ---------------------------------------------------------------------------
+# route_implicit_requirements tests
+# ---------------------------------------------------------------------------
+
+def test_implicit_route_ok_when_passed():
+    state = _base_state(implicit_requirements_validation_passed=True, implicit_requirements_attempt_count=1)
+    assert route_implicit_requirements(state) == "ok"
+
+
+def test_implicit_route_retry_when_failed_and_attempts_remain():
+    state = _base_state(implicit_requirements_validation_passed=False, implicit_requirements_attempt_count=1)
+    assert route_implicit_requirements(state) == "retry"
+
+
+def test_implicit_route_give_up_at_max_attempts():
+    state = _base_state(implicit_requirements_validation_passed=False, implicit_requirements_attempt_count=3)
+    assert route_implicit_requirements(state) == "give_up"
+
+
+def test_implicit_route_ok_takes_priority_over_attempts():
+    """validation_passed=True always wins regardless of attempt count."""
+    state = _base_state(implicit_requirements_validation_passed=True, implicit_requirements_attempt_count=4)
+    assert route_implicit_requirements(state) == "ok"
+
+
+# ---------------------------------------------------------------------------
+# make_deduplicate_requirements_node tests
+# ---------------------------------------------------------------------------
+
+DEDUP_EXPLICIT = [
+    {"label": "Python proficiency", "description": "3+ years of Python in production", "priority": "minimum_requirement", "is_implicit": False},
+    {"label": "Team leadership", "description": "Experience leading small engineering teams", "priority": "preferred_requirement", "is_implicit": False},
+]
+DEDUP_IMPLICIT = [
+    {"label": "Python experience", "description": "Implied by production Python work", "priority": "preferred_requirement", "is_implicit": True},
+    {"label": "Communication skills", "description": "Implied by cross-functional team context", "priority": "nice_to_have", "is_implicit": True},
+]
+
+
+def test_deduplicate_removes_overlapping_implicit():
+    """LLM-identified overlap causes the implicit requirement to be dropped."""
+    llm = MockLLM([json.dumps({"remove": ["Python experience"]})])
+    node = make_deduplicate_requirements_node(llm)
+
+    result = node(_base_state(job_requirements=DEDUP_EXPLICIT, implicit_requirements=DEDUP_IMPLICIT))
+
+    labels = [r["label"] for r in result["implicit_requirements"]]
+    assert "Python experience" not in labels
+    assert "Communication skills" in labels
+
+
+def test_deduplicate_keeps_all_when_no_overlap():
+    """Empty remove list → all implicit requirements retained."""
+    llm = MockLLM([json.dumps({"remove": []})])
+    node = make_deduplicate_requirements_node(llm)
+
+    result = node(_base_state(job_requirements=DEDUP_EXPLICIT, implicit_requirements=DEDUP_IMPLICIT))
+
+    assert len(result["implicit_requirements"]) == 2
+
+
+def test_deduplicate_removes_all_implicit_when_fully_overlapping():
+    """All implicit requirements overlap → empty list returned."""
+    llm = MockLLM([json.dumps({"remove": ["Python experience", "Communication skills"]})])
+    node = make_deduplicate_requirements_node(llm)
+
+    result = node(_base_state(job_requirements=DEDUP_EXPLICIT, implicit_requirements=DEDUP_IMPLICIT))
+
+    assert result["implicit_requirements"] == []
+
+
+def test_deduplicate_skips_llm_when_explicit_empty():
+    """No explicit requirements → skip LLM call entirely."""
+    llm = MockLLM([])  # zero calls expected
+    node = make_deduplicate_requirements_node(llm)
+
+    result = node(_base_state(job_requirements=[], implicit_requirements=DEDUP_IMPLICIT))
+
+    assert result == {}
+
+
+def test_deduplicate_skips_llm_when_implicit_empty():
+    """No implicit requirements → skip LLM call entirely."""
+    llm = MockLLM([])
+    node = make_deduplicate_requirements_node(llm)
+
+    result = node(_base_state(job_requirements=DEDUP_EXPLICIT, implicit_requirements=[]))
+
+    assert result == {}
+
+
+def test_deduplicate_skips_llm_when_both_none():
+    """None values for both lists → skip LLM call entirely."""
+    llm = MockLLM([])
+    node = make_deduplicate_requirements_node(llm)
+
+    result = node(_base_state(job_requirements=None, implicit_requirements=None))
+
+    assert result == {}
+
+
+def test_deduplicate_falls_back_on_parse_failure():
+    """Unparseable LLM response → return empty dict (keep all implicit requirements)."""
+    llm = MockLLM(["not valid json at all"])
+    node = make_deduplicate_requirements_node(llm)
+
+    result = node(_base_state(job_requirements=DEDUP_EXPLICIT, implicit_requirements=DEDUP_IMPLICIT))
+
+    assert result == {}
+
+
+def test_deduplicate_handles_markdown_fenced_response():
+    """extract_json() strips markdown fences before parsing."""
+    wrapped = f"```json\n{json.dumps({'remove': ['Python experience']})}\n```"
+    llm = MockLLM([wrapped])
+    node = make_deduplicate_requirements_node(llm)
+
+    result = node(_base_state(job_requirements=DEDUP_EXPLICIT, implicit_requirements=DEDUP_IMPLICIT))
+
+    assert all(r["label"] != "Python experience" for r in result["implicit_requirements"])

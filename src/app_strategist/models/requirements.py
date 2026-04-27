@@ -34,3 +34,9 @@ class JobRequirement(BaseModel):
             "'ambiguous' when the JD language is unclear or contradictory."
         ),
     )
+    is_implicit: bool = Field(
+        default=False,
+        description=(
+            "True when inferred from implicit JD evidence rather than stated explicitly."
+        ),
+    )
