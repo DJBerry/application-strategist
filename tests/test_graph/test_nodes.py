@@ -13,6 +13,7 @@ from app_strategist.graph.nodes import (
     finalize_node,
     finalize_requirements_node,
     finalize_implicit_requirements_node,
+    finalize_qualification_scores_node,
     make_check_node,
     make_correct_requirements_node,
     make_correct_implicit_requirements_node,
@@ -20,11 +21,15 @@ from app_strategist.graph.nodes import (
     make_extract_node,
     make_extract_requirements_node,
     make_extract_implicit_requirements_node,
+    make_recheck_qualification_scores_node,
     make_retry_node,
+    make_score_qualifications_node,
     make_validate_requirements_node,
     make_validate_implicit_requirements_node,
+    make_validate_qualification_scores_node,
     route_after_check,
     route_after_requirements_validation,
+    route_after_qualification_scores_validation,
     route_implicit_requirements,
 )
 
@@ -90,6 +95,13 @@ def _base_state(**overrides) -> dict:
         "implicit_requirements_validation_result": None,
         "implicit_requirements_attempt_count": 0,
         "implicit_requirements_warnings": [],
+        "qualifications_to_score": None,
+        "qualification_scores": None,
+        "qualification_scores_validation_passed": False,
+        "qualification_scores_validation_result": None,
+        "qualification_scores_attempt_count": 0,
+        "qualification_scores_warnings": [],
+        "qualification_scoring_result": None,
     }
     state.update(overrides)
     return state
@@ -1082,3 +1094,468 @@ def test_deduplicate_handles_markdown_fenced_response():
     result = node(_base_state(job_requirements=DEDUP_EXPLICIT, implicit_requirements=DEDUP_IMPLICIT))
 
     assert all(r["label"] != "Python experience" for r in result["implicit_requirements"])
+
+
+# ---------------------------------------------------------------------------
+# Helpers for qualification scoring tests
+# ---------------------------------------------------------------------------
+
+SAMPLE_EXPLICIT_REQS = [
+    {"label": "Python proficiency", "description": "3+ years of Python in production", "priority": "minimum_requirement", "is_implicit": False},
+    {"label": "Team leadership", "description": "Experience leading small engineering teams", "priority": "preferred_requirement", "is_implicit": False},
+]
+
+SAMPLE_IMPLICIT_REQS = [
+    {"label": "Version control familiarity", "description": "Implied by collaborative codebase context", "priority": "preferred_requirement", "is_implicit": True},
+]
+
+SAMPLE_SCORE_RESPONSE = json.dumps({
+    "scores": [
+        {"label": "Python proficiency", "score": 3, "evidence": ["Led Python projects at ACME"]},
+        {"label": "Team leadership", "score": 2, "evidence": ["Mentored two junior engineers"]},
+        {"label": "Version control familiarity", "score": 4, "evidence": ["Daily git usage"]},
+    ]
+})
+
+QUAL_VALIDATE_PASS = json.dumps({"all_correct": True, "issues": []})
+
+
+def _qual_validate_fail(issues: list[dict]) -> str:
+    return json.dumps({"all_correct": False, "issues": issues})
+
+
+def _scored_qualification(
+    label: str,
+    description: str,
+    priority: str,
+    is_implicit: bool,
+    score: int,
+    evidence: list[str] | None = None,
+    rejection_reason: str | None = None,
+    unresolved: bool = False,
+) -> dict:
+    """Build a qualification score dict as the node would produce it."""
+    return {
+        "label": label,
+        "description": description,
+        "priority": priority,
+        "is_implicit": is_implicit,
+        "evidence": evidence or [],
+        "attempts": [{"score": score, "rejection_reason": rejection_reason}],
+        "final_score": score,
+        "unresolved": unresolved,
+    }
+
+
+# ---------------------------------------------------------------------------
+# make_score_qualifications_node tests
+# ---------------------------------------------------------------------------
+
+def test_score_qualifications_node_scores_two_items():
+    llm = MockLLM([SAMPLE_SCORE_RESPONSE])
+    node = make_score_qualifications_node(llm)
+
+    state = _base_state(job_requirements=SAMPLE_EXPLICIT_REQS[:2], implicit_requirements=[])
+    result = node(state)
+
+    assert len(result["qualification_scores"]) == 2
+    labels = [q["label"] for q in result["qualification_scores"]]
+    assert "Python proficiency" in labels
+    assert "Team leadership" in labels
+    assert result["qualification_scores_attempt_count"] == 1
+
+
+def test_score_qualifications_node_builds_unified_pool():
+    """Explicit + implicit qualifications are combined into qualifications_to_score."""
+    llm = MockLLM([SAMPLE_SCORE_RESPONSE])
+    node = make_score_qualifications_node(llm)
+
+    state = _base_state(job_requirements=SAMPLE_EXPLICIT_REQS, implicit_requirements=SAMPLE_IMPLICIT_REQS)
+    result = node(state)
+
+    pool = result["qualifications_to_score"]
+    assert len(pool) == 3
+    assert pool[0]["is_implicit"] is False
+    assert pool[2]["is_implicit"] is True
+
+
+def test_score_qualifications_node_idempotent_pool():
+    """If qualifications_to_score is already set, it is not rebuilt."""
+    existing_pool = [{"label": "Existing", "description": "...", "priority": "ambiguous", "is_implicit": False}]
+    existing_score = json.dumps({"scores": [{"label": "Existing", "score": 1, "evidence": ["some text"]}]})
+    llm = MockLLM([existing_score])
+    node = make_score_qualifications_node(llm)
+
+    state = _base_state(
+        job_requirements=SAMPLE_EXPLICIT_REQS,
+        qualifications_to_score=existing_pool,
+    )
+    result = node(state)
+
+    assert result["qualifications_to_score"] == existing_pool
+    assert len(result["qualification_scores"]) == 1
+
+
+def test_score_qualifications_node_handles_markdown_fences():
+    wrapped = f"```json\n{SAMPLE_SCORE_RESPONSE}\n```"
+    llm = MockLLM([wrapped])
+    node = make_score_qualifications_node(llm)
+
+    result = node(_base_state(job_requirements=SAMPLE_EXPLICIT_REQS[:2], implicit_requirements=[]))
+
+    assert result["qualification_scores"][0]["label"] == "Python proficiency"
+
+
+def test_score_qualifications_node_increments_attempt_count():
+    llm = MockLLM([SAMPLE_SCORE_RESPONSE])
+    node = make_score_qualifications_node(llm)
+
+    result = node(_base_state(
+        job_requirements=SAMPLE_EXPLICIT_REQS[:2],
+        implicit_requirements=[],
+        qualification_scores_attempt_count=1,
+    ))
+
+    assert result["qualification_scores_attempt_count"] == 2
+
+
+def test_score_qualifications_node_defensive_zero_for_omitted_item():
+    """Qualifications the LLM omits get score=0 with a rejection_reason."""
+    partial_response = json.dumps({"scores": [
+        {"label": "Python proficiency", "score": 3, "evidence": ["some Python work"]},
+        # Team leadership is missing
+    ]})
+    llm = MockLLM([partial_response])
+    node = make_score_qualifications_node(llm)
+
+    result = node(_base_state(job_requirements=SAMPLE_EXPLICIT_REQS, implicit_requirements=[]))
+
+    leadership = next(q for q in result["qualification_scores"] if q["label"] == "Team leadership")
+    assert leadership["final_score"] == 0
+    assert leadership["attempts"][0]["rejection_reason"] == "LLM did not return a score"
+
+
+def test_score_qualifications_node_sets_attempt_with_none_rejection_for_scored_items():
+    """Items the LLM does score get rejection_reason=None."""
+    llm = MockLLM([SAMPLE_SCORE_RESPONSE])
+    node = make_score_qualifications_node(llm)
+
+    result = node(_base_state(job_requirements=SAMPLE_EXPLICIT_REQS[:1], implicit_requirements=[]))
+
+    python_req = result["qualification_scores"][0]
+    assert python_req["attempts"][0]["rejection_reason"] is None
+    assert python_req["attempts"][0]["score"] == 3
+
+
+# ---------------------------------------------------------------------------
+# make_validate_qualification_scores_node tests
+# ---------------------------------------------------------------------------
+
+def test_validate_qualification_scores_node_passes():
+    llm = MockLLM([QUAL_VALIDATE_PASS])
+    node = make_validate_qualification_scores_node(llm)
+
+    state = _base_state(
+        qualification_scores=[_scored_qualification("Python proficiency", "3+ years Python", "minimum_requirement", False, 3, ["evidence"])],
+        qualification_scores_attempt_count=1,
+    )
+    result = node(state)
+
+    assert result["qualification_scores_validation_passed"] is True
+    assert result["qualification_scores_validation_result"]["all_correct"] is True
+    assert result["qualification_scores_validation_result"]["issues"] == []
+
+
+def test_validate_qualification_scores_node_fails():
+    issues = [
+        {
+            "label": "Python proficiency",
+            "current_score": 3,
+            "problem": "Evidence cites Python scripting only, not production use",
+            "suggested_score": 2,
+        }
+    ]
+    llm = MockLLM([_qual_validate_fail(issues)])
+    node = make_validate_qualification_scores_node(llm)
+
+    state = _base_state(
+        qualification_scores=[_scored_qualification("Python proficiency", "3+ years Python", "minimum_requirement", False, 3)],
+        qualification_scores_attempt_count=1,
+    )
+    result = node(state)
+
+    assert result["qualification_scores_validation_passed"] is False
+    assert len(result["qualification_scores_validation_result"]["issues"]) == 1
+
+
+def test_validate_qualification_scores_node_markdown_fences():
+    wrapped = f"```json\n{QUAL_VALIDATE_PASS}\n```"
+    llm = MockLLM([wrapped])
+    node = make_validate_qualification_scores_node(llm)
+
+    result = node(_base_state(
+        qualification_scores=[_scored_qualification("Python proficiency", "desc", "minimum_requirement", False, 2)],
+        qualification_scores_attempt_count=1,
+    ))
+
+    assert result["qualification_scores_validation_passed"] is True
+
+
+# ---------------------------------------------------------------------------
+# make_recheck_qualification_scores_node tests
+# ---------------------------------------------------------------------------
+
+def _two_scored_qualifications() -> list[dict]:
+    return [
+        _scored_qualification("Python proficiency", "3+ years Python", "minimum_requirement", False, 3, ["scripting work"]),
+        _scored_qualification("Team leadership", "Leading teams", "preferred_requirement", False, 2, ["managed one intern"]),
+    ]
+
+
+def test_recheck_node_rescores_only_flagged_items():
+    """Unflagged item is returned unchanged; flagged item gets a new score."""
+    recheck_response = json.dumps({"scores": [
+        {"label": "Python proficiency", "score": 2, "evidence": ["only scripting, not production"]},
+    ]})
+    issues = [{"label": "Python proficiency", "current_score": 3, "problem": "Only scripting, not prod", "suggested_score": 2}]
+    llm = MockLLM([recheck_response])
+    node = make_recheck_qualification_scores_node(llm)
+
+    state = _base_state(
+        qualification_scores=_two_scored_qualifications(),
+        qualification_scores_attempt_count=1,
+        qualification_scores_validation_result={"all_correct": False, "issues": issues},
+    )
+    result = node(state)
+
+    python_q = next(q for q in result["qualification_scores"] if q["label"] == "Python proficiency")
+    leadership_q = next(q for q in result["qualification_scores"] if q["label"] == "Team leadership")
+
+    # Flagged item gets updated score and new attempt
+    assert python_q["final_score"] == 2
+    assert len(python_q["attempts"]) == 2
+    assert python_q["attempts"][-1]["score"] == 2
+    assert python_q["attempts"][-1]["rejection_reason"] is None
+
+    # Unflagged item is unchanged
+    assert leadership_q["final_score"] == 2
+    assert len(leadership_q["attempts"]) == 1
+
+
+def test_recheck_node_attaches_rejection_reason_to_prior_attempt():
+    """The validator's problem is written onto the previous attempt before the new one."""
+    recheck_response = json.dumps({"scores": [
+        {"label": "Python proficiency", "score": 2, "evidence": ["scripting only"]}
+    ]})
+    issues = [{"label": "Python proficiency", "current_score": 3, "problem": "Scripting != production", "suggested_score": 2}]
+    llm = MockLLM([recheck_response])
+    node = make_recheck_qualification_scores_node(llm)
+
+    state = _base_state(
+        qualification_scores=_two_scored_qualifications(),
+        qualification_scores_attempt_count=1,
+        qualification_scores_validation_result={"all_correct": False, "issues": issues},
+    )
+    result = node(state)
+
+    python_q = next(q for q in result["qualification_scores"] if q["label"] == "Python proficiency")
+    # First attempt (the one that was flagged) should now carry the rejection_reason
+    assert python_q["attempts"][0]["rejection_reason"] == "Scripting != production"
+    # Second attempt (the re-score) has no rejection_reason
+    assert python_q["attempts"][1]["rejection_reason"] is None
+
+
+def test_recheck_node_preserves_unflagged_items_unchanged():
+    """Items not in the issues list are returned exactly as they were."""
+    recheck_response = json.dumps({"scores": [
+        {"label": "Python proficiency", "score": 1, "evidence": []}
+    ]})
+    issues = [{"label": "Python proficiency", "current_score": 3, "problem": "Too high", "suggested_score": 1}]
+    llm = MockLLM([recheck_response])
+    node = make_recheck_qualification_scores_node(llm)
+
+    original = _two_scored_qualifications()
+    state = _base_state(
+        qualification_scores=original,
+        qualification_scores_attempt_count=1,
+        qualification_scores_validation_result={"all_correct": False, "issues": issues},
+    )
+    result = node(state)
+
+    leadership_q = next(q for q in result["qualification_scores"] if q["label"] == "Team leadership")
+    assert leadership_q["final_score"] == 2
+    assert len(leadership_q["attempts"]) == 1
+    assert leadership_q["evidence"] == ["managed one intern"]
+
+
+def test_recheck_node_increments_attempt_count():
+    recheck_response = json.dumps({"scores": [
+        {"label": "Python proficiency", "score": 2, "evidence": []}
+    ]})
+    issues = [{"label": "Python proficiency", "current_score": 3, "problem": "Too high"}]
+    llm = MockLLM([recheck_response])
+    node = make_recheck_qualification_scores_node(llm)
+
+    state = _base_state(
+        qualification_scores=_two_scored_qualifications(),
+        qualification_scores_attempt_count=2,
+        qualification_scores_validation_result={"all_correct": False, "issues": issues},
+    )
+    result = node(state)
+
+    assert result["qualification_scores_attempt_count"] == 3
+
+
+def test_recheck_node_keeps_prior_score_when_llm_omits_flagged_item():
+    """If the LLM fails to re-return a flagged item, its prior score is kept."""
+    recheck_response = json.dumps({"scores": []})  # returns nothing
+    issues = [{"label": "Python proficiency", "current_score": 3, "problem": "Too high"}]
+    llm = MockLLM([recheck_response])
+    node = make_recheck_qualification_scores_node(llm)
+
+    state = _base_state(
+        qualification_scores=_two_scored_qualifications(),
+        qualification_scores_attempt_count=1,
+        qualification_scores_validation_result={"all_correct": False, "issues": issues},
+    )
+    result = node(state)
+
+    python_q = next(q for q in result["qualification_scores"] if q["label"] == "Python proficiency")
+    # Score unchanged; only one attempt (with validator's rejection_reason attached)
+    assert python_q["final_score"] == 3
+    assert len(python_q["attempts"]) == 1
+    assert python_q["attempts"][0]["rejection_reason"] == "Too high"
+
+
+# ---------------------------------------------------------------------------
+# finalize_qualification_scores_node tests
+# ---------------------------------------------------------------------------
+
+def _make_scored_pool() -> list[dict]:
+    """Three items across two priorities."""
+    return [
+        _scored_qualification("Python proficiency", "desc", "minimum_requirement", False, 4, ["strong"]),
+        _scored_qualification("Team leadership", "desc", "preferred_requirement", False, 2, ["some"]),
+        _scored_qualification("Nice bonus", "desc", "nice_to_have", False, 0),
+    ]
+
+
+def test_finalize_node_computes_totals():
+    state = _base_state(
+        qualification_scores=_make_scored_pool(),
+        qualification_scores_validation_passed=True,
+        qualification_scores_attempt_count=1,
+    )
+    result = finalize_qualification_scores_node(state)
+
+    totals = result["qualification_scoring_result"]["totals"]
+    assert totals["minimum_requirement"] == pytest.approx(1.0)    # 4/4
+    assert totals["preferred_requirement"] == pytest.approx(0.5)  # 2/4
+    assert totals["nice_to_have"] == pytest.approx(0.0)           # 0/4
+    assert totals["ambiguous"] == pytest.approx(0.0)              # no items → 0.0
+
+
+def test_finalize_node_empty_category_gives_zero():
+    """A priority with no items must produce 0.0, not a division-by-zero error."""
+    state = _base_state(
+        qualification_scores=[
+            _scored_qualification("Python proficiency", "desc", "minimum_requirement", False, 4),
+        ],
+        qualification_scores_validation_passed=True,
+        qualification_scores_attempt_count=1,
+    )
+    result = finalize_qualification_scores_node(state)
+
+    totals = result["qualification_scoring_result"]["totals"]
+    assert totals["preferred_requirement"] == 0.0
+    assert totals["nice_to_have"] == 0.0
+    assert totals["ambiguous"] == 0.0
+
+
+def test_finalize_node_writes_qualification_scoring_result():
+    state = _base_state(
+        qualification_scores=_make_scored_pool(),
+        qualification_scores_validation_passed=True,
+        qualification_scores_attempt_count=1,
+    )
+    result = finalize_qualification_scores_node(state)
+
+    qsr = result["qualification_scoring_result"]
+    assert "qualifications" in qsr
+    assert "totals" in qsr
+    assert "warnings" in qsr
+    assert len(qsr["qualifications"]) == 3
+
+
+def test_finalize_node_sets_unresolved_on_give_up():
+    """On the give_up branch, still-flagged items get unresolved=True and a warning."""
+    issues = [{"label": "Python proficiency", "current_score": 3, "problem": "Too high"}]
+    state = _base_state(
+        qualification_scores=_make_scored_pool(),
+        qualification_scores_validation_passed=False,
+        qualification_scores_attempt_count=3,
+        qualification_scores_validation_result={"all_correct": False, "issues": issues},
+    )
+    result = finalize_qualification_scores_node(state)
+
+    qsr = result["qualification_scoring_result"]
+    python_q = next(q for q in qsr["qualifications"] if q["label"] == "Python proficiency")
+    assert python_q["unresolved"] is True
+    assert len(result["qualification_scores_warnings"]) == 1
+    assert "Python proficiency" in result["qualification_scores_warnings"][0]
+
+
+def test_finalize_node_no_warnings_on_ok_path():
+    """On the ok branch, no warnings are generated."""
+    state = _base_state(
+        qualification_scores=_make_scored_pool(),
+        qualification_scores_validation_passed=True,
+        qualification_scores_attempt_count=1,
+    )
+    result = finalize_qualification_scores_node(state)
+
+    assert result["qualification_scores_warnings"] == []
+    assert all(not q["unresolved"] for q in result["qualification_scoring_result"]["qualifications"])
+
+
+def test_finalize_node_empty_pool_produces_zero_totals():
+    """An empty qualification pool is valid; all totals are 0.0."""
+    state = _base_state(
+        qualification_scores=[],
+        qualification_scores_validation_passed=True,
+        qualification_scores_attempt_count=1,
+    )
+    result = finalize_qualification_scores_node(state)
+
+    totals = result["qualification_scoring_result"]["totals"]
+    assert all(v == 0.0 for v in totals.values())
+
+
+# ---------------------------------------------------------------------------
+# route_after_qualification_scores_validation tests
+# ---------------------------------------------------------------------------
+
+def test_qual_route_ok_when_passed():
+    state = _base_state(qualification_scores_validation_passed=True, qualification_scores_attempt_count=1)
+    assert route_after_qualification_scores_validation(state) == "ok"
+
+
+def test_qual_route_retry_when_failed_and_attempts_remain():
+    state = _base_state(qualification_scores_validation_passed=False, qualification_scores_attempt_count=1)
+    assert route_after_qualification_scores_validation(state) == "retry"
+
+
+def test_qual_route_retry_at_attempt_two():
+    state = _base_state(qualification_scores_validation_passed=False, qualification_scores_attempt_count=2)
+    assert route_after_qualification_scores_validation(state) == "retry"
+
+
+def test_qual_route_give_up_at_max_attempts():
+    state = _base_state(qualification_scores_validation_passed=False, qualification_scores_attempt_count=3)
+    assert route_after_qualification_scores_validation(state) == "give_up"
+
+
+def test_qual_route_ok_takes_priority_over_max_attempts():
+    """validation_passed=True always wins regardless of attempt count."""
+    state = _base_state(qualification_scores_validation_passed=True, qualification_scores_attempt_count=4)
+    assert route_after_qualification_scores_validation(state) == "ok"

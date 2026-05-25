@@ -20,6 +20,7 @@ from app_strategist.llm.base import LLMProvider
 from app_strategist.utils import extract_json
 from app_strategist.graph.state import GraphState
 from app_strategist.models.requirements import JobRequirement
+from app_strategist.models.scoring import QualificationScore, QualificationScoringResult, ScoreAttempt
 from app_strategist.graph.prompts import (
     EXTRACT_SYSTEM_PROMPT,
     EXTRACT_USER_TEMPLATE,
@@ -41,6 +42,12 @@ from app_strategist.graph.prompts import (
     CORRECT_IMPLICIT_REQUIREMENTS_USER_TEMPLATE,
     DEDUPLICATE_REQUIREMENTS_SYSTEM_PROMPT,
     DEDUPLICATE_REQUIREMENTS_USER_TEMPLATE,
+    SCORE_QUALIFICATIONS_SYSTEM_PROMPT,
+    SCORE_QUALIFICATIONS_USER_TEMPLATE,
+    VALIDATE_QUALIFICATION_SCORES_SYSTEM_PROMPT,
+    VALIDATE_QUALIFICATION_SCORES_USER_TEMPLATE,
+    RECHECK_QUALIFICATION_SCORES_SYSTEM_PROMPT_TEMPLATE,
+    RECHECK_QUALIFICATION_SCORES_USER_TEMPLATE,
 )
 
 logger = logging.getLogger(__name__)
@@ -80,6 +87,9 @@ def _validate_requirement(r: dict) -> dict | None:
 MAX_ATTEMPTS = 3
 MAX_REQUIREMENTS_ATTEMPTS = 3  # 1 initial extraction + 2 correction retries
 MAX_IMPLICIT_REQUIREMENTS_ATTEMPTS = 3  # 1 initial extraction + 2 correction retries
+MAX_QUALIFICATION_SCORE_ATTEMPTS = 3   # 1 initial scoring + 2 rechecks
+
+_FULLY_MET_SCORE = 4
 
 
 # ---------------------------------------------------------------------------
@@ -712,6 +722,359 @@ def make_deduplicate_requirements_node(llm: LLMProvider) -> Callable[[GraphState
 # ---------------------------------------------------------------------------
 # Internal helper
 # ---------------------------------------------------------------------------
+
+def _validate_qualification_score(q: dict) -> dict | None:
+    """Validate a raw qualification score dict through QualificationScore.
+
+    Returns None (with a warning) only when validation fails so that one bad
+    item cannot silently drop from the final result.
+    """
+    try:
+        return QualificationScore.model_validate(q).model_dump()
+    except Exception:
+        logger.warning("qualification score %r is invalid; skipping", q.get("label"))
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Factory: score_qualifications node
+# ---------------------------------------------------------------------------
+
+def make_score_qualifications_node(llm: LLMProvider) -> Callable[[GraphState], dict]:
+    """Return a node that scores every qualification against the candidate documents."""
+
+    def score_qualifications_node(state: GraphState) -> dict:
+        # Build the unified pool once; idempotent on re-entry.
+        if state.get("qualifications_to_score") is None:
+            explicit = [
+                {
+                    "label": r["label"],
+                    "description": r["description"],
+                    "priority": r["priority"],
+                    "is_implicit": r.get("is_implicit", False),
+                }
+                for r in (state.get("job_requirements") or [])
+            ]
+            implicit = [
+                {
+                    "label": r["label"],
+                    "description": r["description"],
+                    "priority": r["priority"],
+                    "is_implicit": r.get("is_implicit", True),
+                }
+                for r in (state.get("implicit_requirements") or [])
+            ]
+            qualifications_to_score = explicit + implicit
+        else:
+            qualifications_to_score = state["qualifications_to_score"]
+
+        resume = state.get("resume") or "(not provided)"
+        cover_letter = state.get("cover_letter") or "(not provided)"
+        user = SCORE_QUALIFICATIONS_USER_TEMPLATE.format(
+            qualifications=json.dumps(
+                [{"label": q["label"], "description": q["description"]} for q in qualifications_to_score],
+                indent=2,
+            ),
+            resume=resume,
+            cover_letter=cover_letter,
+        )
+        logger.debug(
+            "score_qualifications_node: scoring %d qualification(s) (attempt %d)",
+            len(qualifications_to_score),
+            state.get("qualification_scores_attempt_count", 0) + 1,
+        )
+        response = llm.complete(SCORE_QUALIFICATIONS_SYSTEM_PROMPT, [{"role": "user", "content": user}])
+        raw = extract_json(response)
+        data = json.loads(raw)
+        scored_map = {item["label"]: item for item in data.get("scores", [])}
+
+        qualification_scores = []
+        for q in qualifications_to_score:
+            label = q["label"]
+            if label in scored_map:
+                s = scored_map[label]
+                score = int(s.get("score", 0))
+                evidence = s.get("evidence", [])
+                attempt = {"score": score, "rejection_reason": None}
+            else:
+                logger.warning(
+                    "score_qualifications_node: LLM did not score %r; defaulting to 0", label
+                )
+                score = 0
+                evidence = []
+                attempt = {"score": 0, "rejection_reason": "LLM did not return a score"}
+
+            qualification_scores.append({
+                "label": label,
+                "description": q["description"],
+                "priority": q["priority"],
+                "is_implicit": q["is_implicit"],
+                "evidence": evidence,
+                "attempts": [attempt],
+                "final_score": score,
+                "unresolved": False,
+            })
+
+        return {
+            "qualifications_to_score": qualifications_to_score,
+            "qualification_scores": qualification_scores,
+            "qualification_scores_attempt_count": state.get("qualification_scores_attempt_count", 0) + 1,
+        }
+
+    return score_qualifications_node
+
+
+# ---------------------------------------------------------------------------
+# Factory: validate_qualification_scores node
+# ---------------------------------------------------------------------------
+
+def make_validate_qualification_scores_node(llm: LLMProvider) -> Callable[[GraphState], dict]:
+    """Return a node that validates qualification scores against the candidate documents."""
+
+    def validate_qualification_scores_node(state: GraphState) -> dict:
+        qualification_scores = state.get("qualification_scores") or []
+        resume = state.get("resume") or "(not provided)"
+        cover_letter = state.get("cover_letter") or "(not provided)"
+        user = VALIDATE_QUALIFICATION_SCORES_USER_TEMPLATE.format(
+            qualification_scores=json.dumps(qualification_scores, indent=2),
+            resume=resume,
+            cover_letter=cover_letter,
+        )
+        logger.debug(
+            "validate_qualification_scores_node: validating %d score(s) (attempt %d)",
+            len(qualification_scores),
+            state.get("qualification_scores_attempt_count", 0),
+        )
+        response = llm.complete(
+            VALIDATE_QUALIFICATION_SCORES_SYSTEM_PROMPT, [{"role": "user", "content": user}]
+        )
+        raw = extract_json(response)
+        validation_result = json.loads(raw)
+
+        issues: list[dict] = validation_result.get("issues", [])
+        passed = not bool(issues)
+        if passed:
+            logger.debug("validate_qualification_scores_node: validation passed")
+        else:
+            flagged = [i.get("label") for i in issues]
+            logger.debug(
+                "validate_qualification_scores_node: validation failed — flagged labels: %s", flagged
+            )
+
+        return {
+            "qualification_scores_validation_passed": passed,
+            "qualification_scores_validation_result": validation_result,
+        }
+
+    return validate_qualification_scores_node
+
+
+# ---------------------------------------------------------------------------
+# Factory: recheck_qualification_scores node
+# ---------------------------------------------------------------------------
+
+def make_recheck_qualification_scores_node(llm: LLMProvider) -> Callable[[GraphState], dict]:
+    """Return a node that re-scores only the qualifications flagged by the validator."""
+
+    def recheck_qualification_scores_node(state: GraphState) -> dict:
+        qualification_scores = list(state.get("qualification_scores") or [])
+        issues: list[dict] = (
+            state.get("qualification_scores_validation_result", {}).get("issues", [])
+            if state.get("qualification_scores_validation_result")
+            else []
+        )
+
+        label_to_idx = {q["label"]: i for i, q in enumerate(qualification_scores)}
+        flagged_labels = {issue["label"] for issue in issues if issue.get("label")}
+
+        # Copy the list so we can mutate safely.
+        updated_scores = [dict(q) for q in qualification_scores]
+
+        # Attach the validator's rejection_reason onto the last attempt of each flagged item.
+        for issue in issues:
+            label = issue.get("label")
+            if label and label in label_to_idx:
+                idx = label_to_idx[label]
+                q = dict(updated_scores[idx])
+                attempts = list(q.get("attempts", []))
+                if attempts:
+                    last = dict(attempts[-1])
+                    last["rejection_reason"] = issue.get("problem", "Flagged by validator")
+                    attempts = attempts[:-1] + [last]
+                q["attempts"] = attempts
+                updated_scores[idx] = q
+
+        # Build the LLM payload: flagged items only, with prior score, evidence, and problem.
+        flagged_items = []
+        for q in updated_scores:
+            if q["label"] not in flagged_labels:
+                continue
+            problem = next(
+                (i.get("problem", "") for i in issues if i.get("label") == q["label"]), ""
+            )
+            flagged_items.append({
+                "label": q["label"],
+                "description": q["description"],
+                "prior_score": q["final_score"],
+                "prior_evidence": q.get("evidence", []),
+                "validator_problem": problem,
+            })
+
+        # Build human-readable issues string for the system prompt template.
+        issue_lines = []
+        for issue in issues:
+            label = issue.get("label", "unknown")
+            problem = issue.get("problem", "")
+            suggested = issue.get("suggested_score")
+            line = f"- '{label}': {problem}"
+            if suggested is not None:
+                line += f" (suggested score: {suggested})"
+            issue_lines.append(line)
+        issues_str = "\n".join(issue_lines) if issue_lines else "(no issues provided)"
+
+        system = RECHECK_QUALIFICATION_SCORES_SYSTEM_PROMPT_TEMPLATE.format(issues=issues_str)
+        resume = state.get("resume") or "(not provided)"
+        cover_letter = state.get("cover_letter") or "(not provided)"
+        user = RECHECK_QUALIFICATION_SCORES_USER_TEMPLATE.format(
+            flagged_qualifications=json.dumps(flagged_items, indent=2),
+            resume=resume,
+            cover_letter=cover_letter,
+        )
+
+        logger.debug(
+            "recheck_qualification_scores_node: re-scoring %d flagged item(s) (attempt %d → %d)",
+            len(flagged_items),
+            state.get("qualification_scores_attempt_count", 0),
+            state.get("qualification_scores_attempt_count", 0) + 1,
+        )
+        response = llm.complete(system, [{"role": "user", "content": user}])
+        raw = extract_json(response)
+        data = json.loads(raw)
+        rescored_map = {item["label"]: item for item in data.get("scores", [])}
+
+        for i, q in enumerate(updated_scores):
+            if q["label"] not in flagged_labels:
+                continue
+            q = dict(updated_scores[i])
+            if q["label"] in rescored_map:
+                rescored = rescored_map[q["label"]]
+                new_score = int(rescored.get("score", q["final_score"]))
+                new_evidence = rescored.get("evidence", q.get("evidence", []))
+                q["attempts"] = list(q.get("attempts", [])) + [
+                    {"score": new_score, "rejection_reason": None}
+                ]
+                q["evidence"] = new_evidence
+                q["final_score"] = new_score
+            # else: LLM didn't return this item — rejection_reason already set above; keep prior score.
+            updated_scores[i] = q
+
+        return {
+            "qualification_scores": updated_scores,
+            "qualification_scores_attempt_count": state.get("qualification_scores_attempt_count", 0) + 1,
+        }
+
+    return recheck_qualification_scores_node
+
+
+# ---------------------------------------------------------------------------
+# Plain node: finalize_qualification_scores (no LLM)
+# ---------------------------------------------------------------------------
+
+_PRIORITY_ORDER = (
+    "minimum_requirement",
+    "preferred_requirement",
+    "nice_to_have",
+    "ambiguous",
+)
+
+
+def finalize_qualification_scores_node(state: GraphState) -> dict:
+    """Compute per-priority totals in Python and write the final scoring result.
+
+    Runs on both the ok and give_up branches. On give_up, marks still-flagged
+    items as unresolved and appends warnings.
+    """
+    qualification_scores = [dict(q) for q in (state.get("qualification_scores") or [])]
+    warnings: list[str] = list(state.get("qualification_scores_warnings") or [])
+
+    give_up = (
+        not state.get("qualification_scores_validation_passed", False)
+        and state.get("qualification_scores_attempt_count", 0) >= MAX_QUALIFICATION_SCORE_ATTEMPTS
+    )
+
+    if give_up:
+        validation_result = state.get("qualification_scores_validation_result") or {}
+        issues = validation_result.get("issues", [])
+        flagged_labels = {i.get("label") for i in issues if i.get("label")}
+        for i, q in enumerate(qualification_scores):
+            if q["label"] in flagged_labels:
+                q = dict(q)
+                q["unresolved"] = True
+                n = state.get("qualification_scores_attempt_count", 0)
+                warnings.append(
+                    f"Qualification score for '{q['label']}' could not be verified after "
+                    f"{n} attempt(s)."
+                )
+                qualification_scores[i] = q
+
+    totals: dict[str, float] = {}
+    for priority in _PRIORITY_ORDER:
+        items = [q for q in qualification_scores if q.get("priority") == priority]
+        totals[priority] = (
+            sum(q["final_score"] for q in items) / (len(items) * _FULLY_MET_SCORE)
+            if items else 0.0
+        )
+
+    validated_qualifications = [
+        v for q in qualification_scores
+        if (v := _validate_qualification_score(q)) is not None
+    ]
+    try:
+        result_model = QualificationScoringResult.model_validate({
+            "qualifications": validated_qualifications,
+            "totals": totals,
+            "warnings": warnings,
+        })
+        qualification_scoring_result = result_model.model_dump()
+    except Exception as exc:
+        logger.warning("finalize_qualification_scores_node: model validation failed — %s", exc)
+        qualification_scoring_result = {
+            "qualifications": validated_qualifications,
+            "totals": totals,
+            "warnings": warnings,
+        }
+
+    logger.debug(
+        "finalize_qualification_scores_node: %d qualification(s), totals=%s, %d warning(s)",
+        len(qualification_scores),
+        {k: round(v, 3) for k, v in totals.items()},
+        len(warnings),
+    )
+    return {
+        "qualification_scores": qualification_scores,
+        "qualification_scoring_result": qualification_scoring_result,
+        "qualification_scores_warnings": warnings,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Conditional edge: route after qualification scores validation
+# ---------------------------------------------------------------------------
+
+def route_after_qualification_scores_validation(state: GraphState) -> str:
+    """Decide the next step after the validate_qualification_scores node.
+
+    Returns:
+        "ok"       — validation passed, proceed to finalize
+        "retry"    — validation failed, attempts remain, loop back to recheck
+        "give_up"  — validation failed, max attempts reached, proceed to finalize
+    """
+    if state.get("qualification_scores_validation_passed"):
+        return "ok"
+    if state.get("qualification_scores_attempt_count", 0) >= MAX_QUALIFICATION_SCORE_ATTEMPTS:
+        return "give_up"
+    return "retry"
+
 
 def _deep_merge(base: dict, updates: dict) -> dict:
     """Recursively merge *updates* into *base*, returning a new dict.

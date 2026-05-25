@@ -111,3 +111,26 @@ class GraphState(TypedDict):
     # Retry tracking for implicit requirements extraction
     implicit_requirements_attempt_count: int
     implicit_requirements_warnings: list[str]  # populated by finalize_implicit_requirements_node
+
+    # Unified pool built at the start of the scoring stage (explicit + implicit, post-dedup).
+    # Schema: list of {label, description, priority, is_implicit}
+    qualifications_to_score: list[dict] | None
+
+    # Per-attempt working state — list of dicts shaped like QualificationScore.model_dump()
+    # but with attempts grown one entry per round. Score nodes mutate this list.
+    qualification_scores: list[dict] | None
+
+    # Validator output. Schema:
+    #   { "all_correct": bool,
+    #     "issues": [
+    #       {"label": str, "current_score": int, "problem": str,
+    #        "suggested_score": int | None}
+    #     ] }
+    qualification_scores_validation_passed: bool
+    qualification_scores_validation_result: dict | None
+
+    qualification_scores_attempt_count: int    # max 3, same constant pattern
+    qualification_scores_warnings: list[str]   # populated by finalize on give_up
+
+    # Final result, written by finalize_qualification_scores_node.
+    qualification_scoring_result: dict | None  # QualificationScoringResult.model_dump()

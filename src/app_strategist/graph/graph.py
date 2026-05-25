@@ -20,7 +20,12 @@ extract_implicit_requirements → validate_implicit_requirements → [conditiona
                             ├─ "retry"   → correct_implicit_requirements → validate_implicit_requirements (loop)
                             └─ "give_up" → finalize_implicit_requirements → deduplicate_requirements
 
-deduplicate_requirements → END
+deduplicate_requirements
+    → score_qualifications
+    → validate_qualification_scores → [conditional]
+            ├─ "ok"      → finalize_qualification_scores → END
+            ├─ "retry"   → recheck_qualification_scores → validate_qualification_scores (loop)
+            └─ "give_up" → finalize_qualification_scores → END
 """
 
 import logging
@@ -33,6 +38,7 @@ from app_strategist.graph.nodes import (
     finalize_node,
     finalize_requirements_node,
     finalize_implicit_requirements_node,
+    finalize_qualification_scores_node,
     make_check_node,
     make_correct_requirements_node,
     make_correct_implicit_requirements_node,
@@ -41,11 +47,15 @@ from app_strategist.graph.nodes import (
     make_extract_requirements_node,
     make_extract_implicit_requirements_node,
     make_retry_node,
+    make_score_qualifications_node,
     make_validate_requirements_node,
     make_validate_implicit_requirements_node,
+    make_validate_qualification_scores_node,
+    make_recheck_qualification_scores_node,
     route_after_check,
     route_after_requirements_validation,
     route_implicit_requirements,
+    route_after_qualification_scores_validation,
 )
 from app_strategist.graph.state import GraphState
 
@@ -90,6 +100,12 @@ def build_extraction_graph(llm: "LLMProvider | None" = None):
     # --- cross-list deduplication node ---
     graph.add_node("deduplicate_requirements", make_deduplicate_requirements_node(_llm))
 
+    # --- qualification scoring nodes ---
+    graph.add_node("score_qualifications", make_score_qualifications_node(_llm))
+    graph.add_node("validate_qualification_scores", make_validate_qualification_scores_node(_llm))
+    graph.add_node("recheck_qualification_scores", make_recheck_qualification_scores_node(_llm))
+    graph.add_node("finalize_qualification_scores", finalize_qualification_scores_node)
+
     # --- metadata extraction loop ---
     graph.set_entry_point("extract")
     graph.add_edge("extract", "check")
@@ -132,7 +148,21 @@ def build_extraction_graph(llm: "LLMProvider | None" = None):
     )
     graph.add_edge("correct_implicit_requirements", "validate_implicit_requirements")
     graph.add_edge("finalize_implicit_requirements", "deduplicate_requirements")
-    graph.add_edge("deduplicate_requirements", END)
+
+    # --- qualification scoring loop ---
+    graph.add_edge("deduplicate_requirements", "score_qualifications")
+    graph.add_edge("score_qualifications", "validate_qualification_scores")
+    graph.add_conditional_edges(
+        "validate_qualification_scores",
+        route_after_qualification_scores_validation,
+        {
+            "ok": "finalize_qualification_scores",
+            "retry": "recheck_qualification_scores",
+            "give_up": "finalize_qualification_scores",
+        },
+    )
+    graph.add_edge("recheck_qualification_scores", "validate_qualification_scores")
+    graph.add_edge("finalize_qualification_scores", END)
 
     return graph.compile()
 
@@ -181,6 +211,14 @@ def run_extraction(
         "implicit_requirements_validation_result": None,
         "implicit_requirements_attempt_count": 0,
         "implicit_requirements_warnings": [],
+        # qualification scoring
+        "qualifications_to_score": None,
+        "qualification_scores": None,
+        "qualification_scores_validation_passed": False,
+        "qualification_scores_validation_result": None,
+        "qualification_scores_attempt_count": 0,
+        "qualification_scores_warnings": [],
+        "qualification_scoring_result": None,
     }
 
     logger.debug("run_extraction: starting graph")
@@ -188,7 +226,8 @@ def run_extraction(
     logger.debug(
         "run_extraction: finished — validation_passed=%s, attempts=%d, concerns=%d, "
         "requirements_validation_passed=%s, req_attempts=%d, req_warnings=%d, "
-        "implicit_requirements_validation_passed=%s, impl_attempts=%d, impl_warnings=%d",
+        "implicit_requirements_validation_passed=%s, impl_attempts=%d, impl_warnings=%d, "
+        "qualification_scores_validation_passed=%s, qual_attempts=%d, qual_warnings=%d",
         result.get("validation_passed"),
         result.get("attempt_count", 0),
         len(result.get("unresolved_concerns", [])),
@@ -198,5 +237,8 @@ def run_extraction(
         result.get("implicit_requirements_validation_passed"),
         result.get("implicit_requirements_attempt_count", 0),
         len(result.get("implicit_requirements_warnings", [])),
+        result.get("qualification_scores_validation_passed"),
+        result.get("qualification_scores_attempt_count", 0),
+        len(result.get("qualification_scores_warnings", [])),
     )
     return result

@@ -78,6 +78,11 @@ IMPLICIT_REQ_EXTRACT_PASS = json.dumps({"requirements": SAMPLE_IMPLICIT_REQUIREM
 IMPLICIT_REQ_VALIDATE_PASS = json.dumps({"all_correct": True, "issues": []})
 DEDUP_PASS = json.dumps({"remove": []})
 
+# Qualification scoring — used by every test that goes through the full pipeline.
+# Empty scores → all items get the defensive score=0; validation passes immediately.
+QUAL_SCORE_PASS = json.dumps({"scores": []})
+QUAL_VALIDATE_PASS = json.dumps({"all_correct": True, "issues": []})
+
 
 class MockLLMSequence:
     """Returns responses in order; raises if more calls are made than configured."""
@@ -123,6 +128,13 @@ def _full_initial_state() -> dict:
         "implicit_requirements_validation_result": None,
         "implicit_requirements_attempt_count": 0,
         "implicit_requirements_warnings": [],
+        "qualifications_to_score": None,
+        "qualification_scores": None,
+        "qualification_scores_validation_passed": False,
+        "qualification_scores_validation_result": None,
+        "qualification_scores_attempt_count": 0,
+        "qualification_scores_warnings": [],
+        "qualification_scoring_result": None,
     }
 
 
@@ -138,7 +150,7 @@ def _extracted_with_wrong_name() -> dict:
 # ---------------------------------------------------------------------------
 
 def test_success_on_first_try():
-    """Graph completes: extract → check(pass) → extract_requirements → validate(pass) → implicit → dedup → END."""
+    """Graph completes: extract → check(pass) → extract_requirements → validate(pass) → implicit → dedup → score → END."""
     llm = MockLLMSequence([
         json.dumps(SAMPLE_EXTRACTED),  # extract
         CHECK_PASS,                    # check → ok
@@ -146,7 +158,9 @@ def test_success_on_first_try():
         REQ_VALIDATE_PASS,             # validate_requirements → ok → implicit
         IMPLICIT_REQ_EXTRACT_PASS,     # extract_implicit_requirements
         IMPLICIT_REQ_VALIDATE_PASS,    # validate_implicit_requirements → ok → dedup
-        DEDUP_PASS,                    # deduplicate_requirements → END
+        DEDUP_PASS,                    # deduplicate_requirements → score
+        QUAL_SCORE_PASS,               # score_qualifications
+        QUAL_VALIDATE_PASS,            # validate_qualification_scores → ok → finalize → END
     ])
     graph = build_extraction_graph(llm=llm)
 
@@ -161,11 +175,11 @@ def test_success_on_first_try():
     assert result["requirements_warnings"] == []
     assert result["implicit_requirements_validation_passed"] is True
     assert result["implicit_requirements_warnings"] == []
-    assert llm.call_count == 7
+    assert llm.call_count == 9
 
 
 def test_retry_then_success():
-    """Metadata retry: extract → check(fail) → retry → check(pass) → req nodes → implicit → dedup → END."""
+    """Metadata retry: extract → check(fail) → retry → check(pass) → req nodes → implicit → dedup → score → END."""
     wrong_extraction = json.dumps(_extracted_with_wrong_name())
     llm = MockLLMSequence([
         wrong_extraction,          # extract
@@ -176,7 +190,9 @@ def test_retry_then_success():
         REQ_VALIDATE_PASS,         # validate_requirements → ok → implicit
         IMPLICIT_REQ_EXTRACT_PASS, # extract_implicit_requirements
         IMPLICIT_REQ_VALIDATE_PASS,# validate_implicit_requirements → ok → dedup
-        DEDUP_PASS,                # deduplicate_requirements → END
+        DEDUP_PASS,                # deduplicate_requirements → score
+        QUAL_SCORE_PASS,           # score_qualifications
+        QUAL_VALIDATE_PASS,        # validate_qualification_scores → ok → finalize → END
     ])
     graph = build_extraction_graph(llm=llm)
 
@@ -188,11 +204,11 @@ def test_retry_then_success():
     assert result["attempt_count"] == 2
     assert result["requirements_validation_passed"] is True
     assert result["implicit_requirements_validation_passed"] is True
-    assert llm.call_count == 9
+    assert llm.call_count == 11
 
 
 def test_max_retries_exceeded():
-    """All 3 metadata attempts fail → finalize → extract_requirements runs anyway → implicit → dedup → END."""
+    """All 3 metadata attempts fail → finalize → extract_requirements runs anyway → implicit → dedup → score → END."""
     wrong = json.dumps(_extracted_with_wrong_name())
     partial_still_wrong = json.dumps({"company_info": {"company_name": "Acme Corp"}})
     llm = MockLLMSequence([
@@ -206,7 +222,9 @@ def test_max_retries_exceeded():
         REQ_VALIDATE_PASS,         # validate_requirements → ok → implicit
         IMPLICIT_REQ_EXTRACT_PASS, # extract_implicit_requirements
         IMPLICIT_REQ_VALIDATE_PASS,# validate_implicit_requirements → ok → dedup
-        DEDUP_PASS,                # deduplicate_requirements → END
+        DEDUP_PASS,                # deduplicate_requirements → score
+        QUAL_SCORE_PASS,           # score_qualifications
+        QUAL_VALIDATE_PASS,        # validate_qualification_scores → ok → finalize → END
     ])
     graph = build_extraction_graph(llm=llm)
 
@@ -220,7 +238,7 @@ def test_max_retries_exceeded():
     assert result["requirements_validation_passed"] is True
     assert len(result["job_requirements"]) == 2
     assert result["implicit_requirements_validation_passed"] is True
-    assert llm.call_count == 11
+    assert llm.call_count == 13
 
 
 def test_run_extraction_returns_full_state():
@@ -233,6 +251,8 @@ def test_run_extraction_returns_full_state():
         IMPLICIT_REQ_EXTRACT_PASS,
         IMPLICIT_REQ_VALIDATE_PASS,
         DEDUP_PASS,
+        QUAL_SCORE_PASS,
+        QUAL_VALIDATE_PASS,
     ])
 
     result = run_extraction(
@@ -252,6 +272,10 @@ def test_run_extraction_returns_full_state():
         "implicit_requirements", "implicit_requirements_validation_passed",
         "implicit_requirements_validation_result", "implicit_requirements_attempt_count",
         "implicit_requirements_warnings",
+        "qualifications_to_score", "qualification_scores",
+        "qualification_scores_validation_passed", "qualification_scores_validation_result",
+        "qualification_scores_attempt_count", "qualification_scores_warnings",
+        "qualification_scoring_result",
     }
     assert expected_keys.issubset(result.keys())
     assert result["job_description"] == SAMPLE_JD
@@ -269,6 +293,8 @@ def test_run_extraction_with_cover_letter():
         IMPLICIT_REQ_EXTRACT_PASS,
         IMPLICIT_REQ_VALIDATE_PASS,
         DEDUP_PASS,
+        QUAL_SCORE_PASS,
+        QUAL_VALIDATE_PASS,
     ])
 
     result = run_extraction(
@@ -291,6 +317,8 @@ def test_extracted_data_has_required_structure():
         IMPLICIT_REQ_EXTRACT_PASS,
         IMPLICIT_REQ_VALIDATE_PASS,
         DEDUP_PASS,
+        QUAL_SCORE_PASS,
+        QUAL_VALIDATE_PASS,
     ])
 
     result = run_extraction(job_description=SAMPLE_JD, llm=llm)
@@ -323,6 +351,8 @@ def test_ambiguous_field_does_not_cause_retry():
         IMPLICIT_REQ_EXTRACT_PASS,
         IMPLICIT_REQ_VALIDATE_PASS,
         DEDUP_PASS,
+        QUAL_SCORE_PASS,
+        QUAL_VALIDATE_PASS,
     ])
 
     result = run_extraction(job_description=SAMPLE_JD, llm=llm)
@@ -331,7 +361,7 @@ def test_ambiguous_field_does_not_cause_retry():
     assert result["unresolved_concerns"] == []
     assert len(result["field_caveats"]) == 1
     assert result["field_caveats"][0]["field"] == "job_info.work_environment"
-    assert llm.call_count == 7
+    assert llm.call_count == 9
 
 
 def test_requirements_retry_then_success():
@@ -376,7 +406,9 @@ def test_requirements_retry_then_success():
         REQ_VALIDATE_PASS,             # validate_requirements → ok → implicit
         IMPLICIT_REQ_EXTRACT_PASS,     # extract_implicit_requirements
         IMPLICIT_REQ_VALIDATE_PASS,    # validate_implicit_requirements → ok → dedup
-        DEDUP_PASS,                    # deduplicate_requirements → END
+        DEDUP_PASS,                    # deduplicate_requirements → score
+        QUAL_SCORE_PASS,               # score_qualifications
+        QUAL_VALIDATE_PASS,            # validate_qualification_scores → ok → finalize → END
     ])
     graph = build_extraction_graph(llm=llm)
 
@@ -388,7 +420,7 @@ def test_requirements_retry_then_success():
     python_req = next(r for r in result["job_requirements"] if r["label"] == "Python proficiency")
     assert python_req["description"] == "Experience with Python in a production environment"
     assert result["implicit_requirements_validation_passed"] is True
-    assert llm.call_count == 9
+    assert llm.call_count == 11
 
 
 def test_requirements_max_retries_exceeded():
@@ -422,7 +454,9 @@ def test_requirements_max_retries_exceeded():
         req_validate_fail,             # validate → give_up → finalize_requirements → implicit
         IMPLICIT_REQ_EXTRACT_PASS,     # extract_implicit_requirements
         IMPLICIT_REQ_VALIDATE_PASS,    # validate_implicit_requirements → ok → dedup
-        DEDUP_PASS,                    # deduplicate_requirements → END
+        DEDUP_PASS,                    # deduplicate_requirements → score
+        QUAL_SCORE_PASS,               # score_qualifications
+        QUAL_VALIDATE_PASS,            # validate_qualification_scores → ok → finalize → END
     ])
     graph = build_extraction_graph(llm=llm)
 
@@ -434,7 +468,7 @@ def test_requirements_max_retries_exceeded():
     assert "did not fully pass" in result["requirements_warnings"][0]
     # Implicit extraction still ran after finalize_requirements
     assert result["implicit_requirements_validation_passed"] is True
-    assert llm.call_count == 11
+    assert llm.call_count == 13
 
 
 # ---------------------------------------------------------------------------
@@ -442,7 +476,7 @@ def test_requirements_max_retries_exceeded():
 # ---------------------------------------------------------------------------
 
 def test_implicit_requirements_success_on_first_try():
-    """Implicit extraction and validation succeed on first attempt → dedup → END."""
+    """Implicit extraction and validation succeed on first attempt → dedup → score → END."""
     llm = MockLLMSequence([
         json.dumps(SAMPLE_EXTRACTED),  # extract
         CHECK_PASS,                    # check → ok
@@ -450,7 +484,9 @@ def test_implicit_requirements_success_on_first_try():
         REQ_VALIDATE_PASS,             # validate_requirements → ok → implicit
         IMPLICIT_REQ_EXTRACT_PASS,     # extract_implicit_requirements
         IMPLICIT_REQ_VALIDATE_PASS,    # validate_implicit_requirements → ok → dedup
-        DEDUP_PASS,                    # deduplicate_requirements → END
+        DEDUP_PASS,                    # deduplicate_requirements → score
+        QUAL_SCORE_PASS,               # score_qualifications
+        QUAL_VALIDATE_PASS,            # validate_qualification_scores → ok → finalize → END
     ])
     graph = build_extraction_graph(llm=llm)
 
@@ -462,7 +498,7 @@ def test_implicit_requirements_success_on_first_try():
     assert result["implicit_requirements"][0]["label"] == "Version control familiarity"
     assert result["implicit_requirements_warnings"] == []
     assert result["implicit_requirements_attempt_count"] == 1
-    assert llm.call_count == 7
+    assert llm.call_count == 9
 
 
 def test_implicit_requirements_retry_then_success():
@@ -499,7 +535,9 @@ def test_implicit_requirements_retry_then_success():
         implicit_validate_fail,        # validate_implicit → retry
         corrected_implicit,            # correct_implicit_requirements (attempt 2)
         IMPLICIT_REQ_VALIDATE_PASS,    # validate_implicit → ok → dedup
-        DEDUP_PASS,                    # deduplicate_requirements → END
+        DEDUP_PASS,                    # deduplicate_requirements → score
+        QUAL_SCORE_PASS,               # score_qualifications
+        QUAL_VALIDATE_PASS,            # validate_qualification_scores → ok → finalize → END
     ])
     graph = build_extraction_graph(llm=llm)
 
@@ -509,7 +547,7 @@ def test_implicit_requirements_retry_then_success():
     assert result["implicit_requirements_warnings"] == []
     assert result["implicit_requirements_attempt_count"] == 2
     assert result["implicit_requirements"][0]["label"] == "Version control familiarity"
-    assert llm.call_count == 9
+    assert llm.call_count == 11
 
 
 def test_implicit_requirements_max_retries_exceeded():
@@ -548,7 +586,9 @@ def test_implicit_requirements_max_retries_exceeded():
         implicit_validate_fail,        # validate_implicit → retry
         still_has_ungrounded,          # correct_implicit (attempt 3)
         implicit_validate_fail,        # validate_implicit → give_up → finalize_implicit → dedup
-        DEDUP_PASS,                    # deduplicate_requirements → END
+        DEDUP_PASS,                    # deduplicate_requirements → score
+        QUAL_SCORE_PASS,               # score_qualifications
+        QUAL_VALIDATE_PASS,            # validate_qualification_scores → ok → finalize → END
     ])
     graph = build_extraction_graph(llm=llm)
 
@@ -558,7 +598,7 @@ def test_implicit_requirements_max_retries_exceeded():
     assert result["implicit_requirements_attempt_count"] == 3
     assert len(result["implicit_requirements_warnings"]) == 1
     assert "did not fully pass" in result["implicit_requirements_warnings"][0]
-    assert llm.call_count == 11
+    assert llm.call_count == 13
 
 
 # ---------------------------------------------------------------------------
@@ -575,14 +615,16 @@ def test_dedup_removes_overlapping_implicit_from_final_state():
         REQ_VALIDATE_PASS,             # validate_requirements → ok → implicit
         IMPLICIT_REQ_EXTRACT_PASS,     # extract_implicit_requirements
         IMPLICIT_REQ_VALIDATE_PASS,    # validate_implicit_requirements → ok → dedup
-        dedup_removes,                 # deduplicate_requirements → END
+        dedup_removes,                 # deduplicate_requirements → score
+        QUAL_SCORE_PASS,               # score_qualifications
+        QUAL_VALIDATE_PASS,            # validate_qualification_scores → ok → finalize → END
     ])
     graph = build_extraction_graph(llm=llm)
 
     result = graph.invoke(_full_initial_state())
 
     assert result["implicit_requirements"] == []
-    assert llm.call_count == 7
+    assert llm.call_count == 9
 
 
 def test_dedup_keeps_all_implicit_when_no_overlap():
@@ -594,7 +636,9 @@ def test_dedup_keeps_all_implicit_when_no_overlap():
         REQ_VALIDATE_PASS,             # validate_requirements → ok → implicit
         IMPLICIT_REQ_EXTRACT_PASS,     # extract_implicit_requirements
         IMPLICIT_REQ_VALIDATE_PASS,    # validate_implicit_requirements → ok → dedup
-        DEDUP_PASS,                    # deduplicate_requirements → END
+        DEDUP_PASS,                    # deduplicate_requirements → score
+        QUAL_SCORE_PASS,               # score_qualifications
+        QUAL_VALIDATE_PASS,            # validate_qualification_scores → ok → finalize → END
     ])
     graph = build_extraction_graph(llm=llm)
 
@@ -602,3 +646,149 @@ def test_dedup_keeps_all_implicit_when_no_overlap():
 
     assert len(result["implicit_requirements"]) == 1
     assert result["implicit_requirements"][0]["label"] == "Version control familiarity"
+
+
+# ---------------------------------------------------------------------------
+# Qualification scoring integration tests
+# ---------------------------------------------------------------------------
+
+def test_qualification_scoring_happy_path():
+    """Full pipeline: scoring passes on first try, totals are written to result."""
+    qual_scores = json.dumps({
+        "scores": [
+            {"label": "Python proficiency", "score": 4, "evidence": ["5 years Python at ACME"]},
+            {"label": "Team leadership", "score": 2, "evidence": ["Mentored 2 juniors"]},
+            {"label": "Version control familiarity", "score": 3, "evidence": ["Daily git use"]},
+        ]
+    })
+    llm = MockLLMSequence([
+        json.dumps(SAMPLE_EXTRACTED),  # extract
+        CHECK_PASS,                    # check → ok
+        REQ_EXTRACT_PASS,              # extract_requirements
+        REQ_VALIDATE_PASS,             # validate_requirements → ok → implicit
+        IMPLICIT_REQ_EXTRACT_PASS,     # extract_implicit_requirements
+        IMPLICIT_REQ_VALIDATE_PASS,    # validate_implicit_requirements → ok → dedup
+        DEDUP_PASS,                    # deduplicate_requirements → score
+        qual_scores,                   # score_qualifications (attempt 1)
+        QUAL_VALIDATE_PASS,            # validate_qualification_scores → ok → finalize → END
+    ])
+    graph = build_extraction_graph(llm=llm)
+
+    result = graph.invoke(_full_initial_state())
+
+    assert result["qualification_scores_validation_passed"] is True
+    assert result["qualification_scores_attempt_count"] == 1
+    assert result["qualification_scores_warnings"] == []
+
+    qsr = result["qualification_scoring_result"]
+    assert qsr is not None
+    totals = qsr["totals"]
+    # Python proficiency: minimum_requirement, score=4 → 4/(1*4)=1.0
+    assert totals["minimum_requirement"] == pytest.approx(1.0)
+    # Team leadership (score=2) + Version control familiarity (score=3), both preferred_requirement
+    # combined: (2+3)/(2*4) = 0.625
+    assert totals["preferred_requirement"] == pytest.approx(0.625)
+    assert totals["nice_to_have"] == pytest.approx(0.0)
+    assert totals["ambiguous"] == pytest.approx(0.0)
+    assert llm.call_count == 9
+
+
+def test_qualification_scoring_recheck_then_success():
+    """Score validation fails once → recheck → validate passes → finalize."""
+    qual_scores_initial = json.dumps({
+        "scores": [
+            {"label": "Python proficiency", "score": 4, "evidence": ["scripting only"]},
+            {"label": "Team leadership", "score": 2, "evidence": ["mentored someone"]},
+            {"label": "Version control familiarity", "score": 3, "evidence": ["used git"]},
+        ]
+    })
+    qual_validate_fail = json.dumps({
+        "all_correct": False,
+        "issues": [
+            {
+                "label": "Python proficiency",
+                "current_score": 4,
+                "problem": "Evidence shows scripting only, not production use",
+                "suggested_score": 2,
+            }
+        ],
+    })
+    qual_recheck = json.dumps({
+        "scores": [
+            {"label": "Python proficiency", "score": 2, "evidence": ["scripting work, not production"]},
+        ]
+    })
+
+    llm = MockLLMSequence([
+        json.dumps(SAMPLE_EXTRACTED),  # extract
+        CHECK_PASS,                    # check → ok
+        REQ_EXTRACT_PASS,              # extract_requirements
+        REQ_VALIDATE_PASS,             # validate_requirements → ok → implicit
+        IMPLICIT_REQ_EXTRACT_PASS,     # extract_implicit_requirements
+        IMPLICIT_REQ_VALIDATE_PASS,    # validate_implicit_requirements → ok → dedup
+        DEDUP_PASS,                    # deduplicate_requirements → score
+        qual_scores_initial,           # score_qualifications (attempt 1)
+        qual_validate_fail,            # validate_qualification_scores → retry
+        qual_recheck,                  # recheck_qualification_scores (attempt 2)
+        QUAL_VALIDATE_PASS,            # validate_qualification_scores → ok → finalize → END
+    ])
+    graph = build_extraction_graph(llm=llm)
+
+    result = graph.invoke(_full_initial_state())
+
+    assert result["qualification_scores_validation_passed"] is True
+    assert result["qualification_scores_attempt_count"] == 2
+    assert result["qualification_scores_warnings"] == []
+
+    qsr = result["qualification_scoring_result"]
+    python_q = next(q for q in qsr["qualifications"] if q["label"] == "Python proficiency")
+    assert python_q["final_score"] == 2
+    assert len(python_q["attempts"]) == 2
+    assert python_q["attempts"][0]["rejection_reason"] == "Evidence shows scripting only, not production use"
+    assert python_q["attempts"][1]["rejection_reason"] is None
+    assert llm.call_count == 11
+
+
+def test_qualification_scoring_give_up():
+    """Score validation fails all 3 attempts → give_up → finalize with warnings."""
+    qual_scores = json.dumps({"scores": [
+        {"label": "Python proficiency", "score": 4, "evidence": ["scripts only"]},
+        {"label": "Team leadership", "score": 1, "evidence": ["mentioned teams"]},
+        {"label": "Version control familiarity", "score": 3, "evidence": ["git"]},
+    ]})
+    qual_validate_fail = json.dumps({
+        "all_correct": False,
+        "issues": [{"label": "Python proficiency", "current_score": 4, "problem": "No production evidence"}],
+    })
+    qual_recheck_still_wrong = json.dumps({"scores": [
+        {"label": "Python proficiency", "score": 4, "evidence": ["still only scripts"]},
+    ]})
+
+    llm = MockLLMSequence([
+        json.dumps(SAMPLE_EXTRACTED),   # extract
+        CHECK_PASS,                     # check → ok
+        REQ_EXTRACT_PASS,               # extract_requirements
+        REQ_VALIDATE_PASS,              # validate_requirements → ok → implicit
+        IMPLICIT_REQ_EXTRACT_PASS,      # extract_implicit_requirements
+        IMPLICIT_REQ_VALIDATE_PASS,     # validate_implicit_requirements → ok → dedup
+        DEDUP_PASS,                     # deduplicate_requirements → score
+        qual_scores,                    # score_qualifications (attempt 1)
+        qual_validate_fail,             # validate → retry
+        qual_recheck_still_wrong,       # recheck (attempt 2)
+        qual_validate_fail,             # validate → retry
+        qual_recheck_still_wrong,       # recheck (attempt 3)
+        qual_validate_fail,             # validate → give_up → finalize → END
+    ])
+    graph = build_extraction_graph(llm=llm)
+
+    result = graph.invoke(_full_initial_state())
+
+    assert result["qualification_scores_validation_passed"] is False
+    assert result["qualification_scores_attempt_count"] == 3
+    assert len(result["qualification_scores_warnings"]) == 1
+    assert "Python proficiency" in result["qualification_scores_warnings"][0]
+
+    qsr = result["qualification_scoring_result"]
+    python_q = next(q for q in qsr["qualifications"] if q["label"] == "Python proficiency")
+    assert python_q["unresolved"] is True
+    assert llm.call_count == 13

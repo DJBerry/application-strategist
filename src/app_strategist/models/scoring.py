@@ -2,6 +2,36 @@
 
 from pydantic import BaseModel, Field
 
+from app_strategist.models.requirements import RequirementPriority
+
+
+class ScoreAttempt(BaseModel):
+    """A single scoring attempt for a qualification."""
+
+    score: int = Field(..., ge=0, le=4)
+    rejection_reason: str | None = None
+
+
+class QualificationScore(BaseModel):
+    """Evidence-based score for one qualification against the candidate's documents."""
+
+    label: str
+    description: str
+    priority: RequirementPriority
+    is_implicit: bool
+    evidence: list[str]
+    attempts: list[ScoreAttempt]
+    final_score: int = Field(..., ge=0, le=4)
+    unresolved: bool = False
+
+
+class QualificationScoringResult(BaseModel):
+    """Scored qualification pool with per-priority totals."""
+
+    qualifications: list[QualificationScore]
+    totals: dict[str, float]
+    warnings: list[str]
+
 
 class ScoreComponent(BaseModel):
     """A single weighted component of a fit score."""

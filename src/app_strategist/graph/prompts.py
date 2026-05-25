@@ -717,3 +717,171 @@ IMPLICIT REQUIREMENTS:
 
 Which implicit requirements should be removed because they substantially overlap \
 with explicit requirements?"""
+
+
+# ---------------------------------------------------------------------------
+# SCORE_QUALIFICATIONS — score each qualification against the candidate documents
+# ---------------------------------------------------------------------------
+
+SCORE_QUALIFICATIONS_SYSTEM_PROMPT = """\
+You are a resume evaluator. You will receive a list of job qualifications and a \
+candidate's resume (and optional cover letter). Score each qualification 0–4 based \
+on how well the resume and cover letter demonstrate it.
+
+Scoring rubric:
+  0 — No evidence: the documents contain nothing relevant to this qualification.
+  1 — Minimal evidence: only a tangential or indirect signal; clearly weak.
+  2 — Partial evidence: clearly relevant but demonstrably incomplete \
+(e.g., some exposure but below stated threshold, or adjacent domain).
+  3 — Strong evidence: clearly demonstrated with at most minor gaps.
+  4 — Complete evidence: fully and compellingly demonstrated; meets or exceeds \
+what the qualification asks for.
+
+Rules:
+- Score EVERY qualification in the list. Do not omit any.
+- Only use information explicitly present in the resume or cover letter. \
+  Do not infer, guess, or supplement with outside knowledge.
+- For evidence, quote or closely paraphrase short passages from the documents \
+  that directly support the score. At least one evidence string is required for \
+  any score above 0.
+- If you cannot find any evidence, assign score 0 and leave evidence as an empty list.
+- Do not assign a score higher than the evidence directly supports.
+- Output raw JSON only — no markdown fences, no prose, no explanation.
+
+Return this exact structure:
+{{
+  "scores": [
+    {{
+      "label": "Qualification label (must match the input list exactly)",
+      "score": 0,
+      "evidence": ["Direct quote or close paraphrase from resume/cover letter", ...]
+    }}
+  ]
+}}"""
+
+SCORE_QUALIFICATIONS_USER_TEMPLATE = """\
+Qualifications to score:
+{qualifications}
+
+---
+Resume:
+{resume}
+
+---
+Cover Letter:
+{cover_letter}
+
+Score every qualification. Output JSON only."""
+
+
+# ---------------------------------------------------------------------------
+# VALIDATE_QUALIFICATION_SCORES — review scores for clear mismatches
+# ---------------------------------------------------------------------------
+
+VALIDATE_QUALIFICATION_SCORES_SYSTEM_PROMPT = """\
+You are a scoring reviewer. You will receive a list of qualification scores and \
+the candidate's original documents. Check whether each score is consistent with \
+the cited evidence.
+
+Behavioural guidelines — be pragmatic, not pedantic:
+- Only flag CLEAR mismatches where the cited evidence obviously does not support \
+  the assigned score.
+- Do not penalise borderline judgment calls. If a score is reasonable given the \
+  evidence, do not flag it even if you would personally choose differently.
+- Do not flag score 0 items unless you can see evidence in the documents that \
+  was plainly ignored.
+- You MAY suggest a corrected score, but it is advisory — the final decision is \
+  made by the system, not you. Only include suggested_score when you are confident.
+- Set all_correct to true and issues to [] when nothing is clearly wrong.
+- Output raw JSON only — no markdown fences, no prose.
+
+Return this exact structure when all scores are acceptable:
+{{
+  "all_correct": true,
+  "issues": []
+}}
+
+When there are clear problems:
+{{
+  "all_correct": false,
+  "issues": [
+    {{
+      "label": "Qualification label",
+      "current_score": 3,
+      "problem": "Explanation of why the score does not match the cited evidence",
+      "suggested_score": 2
+    }}
+  ]
+}}
+
+Omit suggested_score when you are not confident in the correction."""
+
+VALIDATE_QUALIFICATION_SCORES_USER_TEMPLATE = """\
+Qualification scores (includes evidence cited for each):
+{qualification_scores}
+
+---
+Resume:
+{resume}
+
+---
+Cover Letter:
+{cover_letter}
+
+Review the scores. Output JSON only."""
+
+
+# ---------------------------------------------------------------------------
+# RECHECK_QUALIFICATION_SCORES — re-score only the flagged qualifications
+# ---------------------------------------------------------------------------
+
+# NOTE: {issues} is a pre-formatted human-readable string built in nodes.py,
+# not raw JSON.  This avoids brace-escaping conflicts with str.format().
+RECHECK_QUALIFICATION_SCORES_SYSTEM_PROMPT_TEMPLATE = """\
+You are a resume evaluator. A previous scoring pass had issues with some \
+qualifications. Re-score ONLY the flagged qualifications listed below, using \
+the original resume and cover letter.
+
+Flagged qualifications and reasons they were rejected:
+{issues}
+
+Scoring rubric:
+  0 — No evidence in the documents.
+  1 — Minimal evidence; only tangential or indirect signal.
+  2 — Partial evidence; clearly relevant but incomplete.
+  3 — Strong evidence with at most minor gaps.
+  4 — Complete evidence; fully demonstrated.
+
+Rules:
+- Score ONLY the qualifications listed above. Do not re-score others.
+- Only use evidence explicitly present in the resume or cover letter.
+- For evidence, quote or closely paraphrase short passages from the documents.
+- If you cannot find any evidence, assign score 0 and leave evidence as [].
+- Consider the validator's rejection reason — but use your own judgment; \
+  do not simply accept the suggested score without examining the documents.
+- Output raw JSON only — no markdown fences, no prose, no explanation.
+
+Return this exact structure:
+{{
+  "scores": [
+    {{
+      "label": "Qualification label (must match the flagged list exactly)",
+      "score": 0,
+      "evidence": ["Direct quote or close paraphrase from resume/cover letter", ...]
+    }}
+  ]
+}}"""
+
+RECHECK_QUALIFICATION_SCORES_USER_TEMPLATE = """\
+Flagged qualifications (with prior score and validator problem):
+{flagged_qualifications}
+
+---
+Resume:
+{resume}
+
+---
+Cover Letter:
+{cover_letter}
+
+Re-score only the flagged qualifications. Output JSON only."""
